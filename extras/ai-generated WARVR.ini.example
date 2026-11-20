@@ -1,0 +1,84 @@
+; ---------------------------------------------------------------- mouse pitch lock (phase 7l)
+; Ctrl+Shift+Numpad- toggles it: the mouse no longer tilts the view up/down (the headset still does). Heading is unaffected.
+;pitch_lock=NUMPAD_SUBTRACT      ; hotkey (Ctrl+Shift+this key)
+;pitch_lock_start=off            ; on = start with the lock already on
+
+; ---------------------------------------------------------------- draw distance (phase 7g)
+; Multiplies the main camera's far clip plane and the engine's culling far plane. 1.0 (default) = the game's own draw-distance setting,
+; 2.0 = twice as far, up to 16. Only what the engine still considers for drawing can appear: if the game fades objects out by its own
+; per-object distance, or hides the distance in fog, a bigger number shows nothing more. Start with 2.0 and look at a far horizon.
+; (With log=on the report line "DRAW DISTANCE: ... game N -> used M" shows the far plane the game asked for and what was used.)
+;draw_distance=1.0
+
+; ---------------------------------------------------------------- logging (phase 7f)
+; Logging is OFF by default: no WARVR.log is written and the capture hotkey does nothing. To diagnose a problem set  log=on
+; (the file is %TEMP%\WARVR.log). Remove or comment the line to turn it off again.
+;log=on
+
+; ---------------------------------------------------------------- ocean / planar water reflection (phase 7f)
+; on (default) = the water's reflection map is rendered for the head's orientation and BOTH eyes look it up identically.
+; off          = the earlier behaviour (use this if the water looks wrong and send a log with log=on).
+;water=on
+
+; Optional. Copy to WARVR.ini next to WARVR.dll. Everything is optional; defaults are shown (commented out).
+
+; ---------------------------------------------------------------- performance (phase 7a)
+; gpu_path: send each eye to SteamVR with a pure GPU copy instead of reading the picture back through the CPU.
+;   auto = try it, fall back to the CPU path by itself if it cannot work.   off = always use the CPU path.
+;gpu_path=auto
+; desktop_every: while in VR the desktop window is NOT presented (saves the blit and, mainly, the wait for your
+; monitor's vertical sync, which used to be added to the headset's own wait). 0 = never. N = show every Nth frame
+; (you will feel a small hitch on those frames), e.g. 60.
+;desktop_every=0
+
+; ---------------------------------------------------------------- VR resolution (phase 7b)
+; auto    = (default) the game renders into a target of the size SteamVR recommends (both eyes side by side) as soon as
+;           the GPU hand-off is available; otherwise it stays at the game's own resolution (the CPU path would squeeze
+;           the picture down to eye_size anyway, so a huge target would be wasted work).
+; steamvr = always use SteamVR's size.        desktop = always the game's own resolution.
+;vr_resolution=auto
+; Pixel budget for BOTH eyes together, in millions. 0 (default) = no budget: SteamVR's exact number, clamped only to what
+; the D3D9 device allows (and, if video memory runs out, reduced 10% at a time until it fits - the log says so).
+; Example: 5976x6252 per eye is 75 million pixels. Set max_pixels=30 if your frame rate cannot take that.
+;max_pixels=0
+; Extra multiplier applied after the budget (1.0 = none).
+;render_scale=1.0
+
+; ---------------------------------------------------------------- mouse cursor in VR
+;cursor=on
+; arrow height as a fraction of the HUD height
+;cursor_size=0.045
+
+; ---------------------------------------------------------------- VR options
+;units_per_meter=32
+;eye_size=0
+;positional=1
+;auto_recenter=0
+;cull=on
+;steer=camera
+;stereo=sbs
+;hud=3d
+; world (default)  = the HUD is a flat panel hanging in space in front of the GAME camera. It does not follow your head: turn and it
+;                    stays put and looks tilted from the side. Recenter (Ctrl+Shift+Numpad /) to bring it in front of you.
+; billboard          = anchored the same way but always faces you (cheaper, the phase 7d behaviour).
+; head               = locked to the headset (the old behaviour).
+;hud_anchor=world
+;hud_distance=1.5
+;hud_width=2.4
+;hud_vertical=0.0
+
+; ---------------------------------------------------------------- hotkeys (Ctrl+Shift + key). Defaults shown.
+;vr=NUMPAD_MULTIPLY
+;recenter=                  (unbound by default; Numpad - is now the mouse pitch lock)
+;recenter2=NUMPAD_DIVIDE
+;recenter3=OEM_2
+;capture=C
+;test=NUMPAD_ADD
+;head=INSERT
+;scale_up=PAGEUP
+;scale_down=PAGEDOWN
+;cull=HOME
+;positional=P
+;cursor=M
+;hud_near=END
+;hud_far=DELETE

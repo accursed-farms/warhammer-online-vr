@@ -1,0 +1,104 @@
+These are my instructions for how I got Warhammer Online: Age of Reckoning working offline on a private server emulator.  They are amateur and may include obvious steps or possibly forget one (hopefully not).  They are NOT AI-generated however, so they won't be telling you unrelated nonsense.  
+
+Download the server emulator files from here (Click on the green "code" button, then "download zip")
+https://github.com/Shmerrick/ProjectWAR/tree/RESTART
+
+Note:  My build is from September 9, 2026.  If the server was updated since then, it's possible that broke something. 
+
+Download zones.zip from here (I'm using the one from February 21, 2026):
+https://github.com/Shmerrick/ProjectWAR/releases
+
+Download mysql installer from here:
+https://dev.mysql.com/downloads/installer/
+I'm using version 8.0.46, workbench version 8.0.47
+I used options: custom install / mysql server / mysql workbench
+After installing, make sure MySQL80 service is running (run services.msc)
+
+Download Visual Studio from here (Visual Studio Community)
+https://visualstudio.microsoft.com/downloads/
+I forgot all the visual studio components needed to install, but probably
+-.NET desktop development
+-Desktop development with C++
+-MSVC v143 - VS 2022 C++ x64/86 build tools (v14.38-17.8)
+-MSVC v143 - VS 2022 C++ x64/86 build tools (v14.38-17.8)
+I included a screenshot (visualstudio_install.png) to show what I have installed if that hels
+
+Download the client from one of the links midway down this page:
+https://github.com/Shmerrick/ProjectWAR/
+
+Unzip ProjectWAR-RESTART where you want to install the server
+After unzipping ProjectWAR-RESTART.zip, unzip \database\war_world.7z under \database into the same directory it's in.
+
+Unzip zones.zip into \deps\zones
+
+Run MySQL Workbench.  I forget the details of creating a new account, but go ahead and make one.  You'll probably have an easier time if you leave it as
+user: root
+pass: password
+but obviously change it to something else if you have security concerns.
+
+go to system properties / advanced / environment variables
+under system variables, click on path / edit / new
+C:\Program Files\MySQL\MySQL Server 8.0\bin  (or whatever directory you installed it to)
+
+in MySQL Workbench under the query tab, enter the following:
+CREATE DATABASE war_accounts;
+CREATE DATABASE war_characters;
+CREATE DATABASE war_world;
+Press the lightning bolt button
+
+click on: server / data import
+select "import from self-contained file"
+select war_accounts.sql from the \Database directory
+under "default target schema" match to the name war_accounts, which was created in the previous step.
+click "start import"
+repeat this step for war_characts.sql and war_world.sql
+
+Clear the query box and enter the following:
+USE war_world;
+ALTER TABLE mythic_src_item_infos
+ADD COLUMN TokUnlock3 int(11) unsigned NOT NULL DEFAULT 0;
+Press the lightning bolt button
+
+Possibly needed additional step:
+run powershell
+enter the following:
+Set-ExecutionPolicy -ExecutionPolicy Unrestricted
+
+copy incremental.ps1 from the mod folder to root emulator directory, then run in powershell:
+.\incremental.ps1
+
+Doubleclick on ProjectWAR.sln
+Check the top menus, it may be set to "debug".  Change it to "Release" and the one next to it to "x64"
+Click on the menu Build / build solution
+
+Check bin\Release\Configs\ to make sure all .xml files have right login and passwords that you set for MySQL
+
+run bin\Release\serverlauncher.exe then check all boxes and launch all
+
+open firewall to make sure everything can connect to it 
+
+under Launcher.exe.Config change to true:
+<add key="PatchMYP" value="true" />
+Copy bin\release\launcher folder to the client folder, run it from there, don't run it from the default location.
+Click on "Create Account" and set up an account to login
+When running the launcher in the future, expect a 10 second delay or so before you can login.
+
+To give youself admin access (I think):
+(z = whatever the account name you want to change is)
+Open MySQL Workbench
+under Query tab enter the following:
+UPDATE war_accounts.accounts SET GmLevel = 5 WHERE Username = 'z';
+
+Run the game by logging into the launcher window after your account is created.  Don't try running WAR.exe directly, it won't work.
+
+If the lobby server fails, change this line to 16000 under bin\release\Account.xml
+<RpcClientStartingPort>16000</RpcClientStartingPort>
+
+You can read the admin commands an AI found under extras\ProjectWAR_GM_Command_Reference.md
+
+It is highly recommended to type ".boot" (no quotes) as an admin inside the game every time before shutting down the server.  Otherwise you risk corrupting the database and might have to try and fix it.
+
+
+
+
+
