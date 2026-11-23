@@ -22,7 +22,7 @@
 ; off          = the earlier behaviour (use this if the water looks wrong and send a log with log=on).
 ;water=on
 
-; Optional. Copy to WARVR.ini next to WARVR.dll. Everything is optional; defaults are shown (commented out).
+; Optional. Copy to WARVR.ini next to WAR.exe. Everything is optional; defaults are shown (commented out).
 
 ; ---------------------------------------------------------------- performance (phase 7a)
 ; gpu_path: send each eye to SteamVR with a pure GPU copy instead of reading the picture back through the CPU.

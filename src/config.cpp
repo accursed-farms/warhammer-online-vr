@@ -1,6 +1,6 @@
 // WARVRConfig.exe: a small settings window for WARVR, for people who would rather not edit WARVR.ini by hand.
 //
-// It lives next to WARVR.dll in the Warhammer folder and edits, keeping everything else in those files as it was:
+// It lives next to WAR.exe in the Warhammer folder and edits, keeping everything else in those files as it was:
 //   WARVR.ini   the main options (the same keys you can type by hand; every other option stays there)
 //   dxvk.conf   anisotropic filtering, when the game runs on DXVK
 //   HKCU\Environment DXVK_LOG_LEVEL   whether DXVK writes its own WAR_d3d9.log

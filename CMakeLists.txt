@@ -1,7 +1,7 @@
-# WARVR build. WAR.exe is a 32-bit process, so the DLL and the injector must be 32-bit (Win32).
+# WARVR build. WAR.exe is a 32-bit process, so the mod must be 32-bit (Win32).
 #
 #   Visual Studio:  double-click build.bat   (or: cmake -S . -B build -A Win32 && cmake --build build --config Release)
-#   Output:         build\Release\WARVR.dll, build\Release\WARVRInjector.exe, build\Release\WARVRConfig.exe
+#   Output:         build\Release\dinput8.dll (the mod), build\Release\WARVRConfig.exe, build\Release\openvr_api.dll
 #   Unit tests:     ctest --test-dir build -C Release
 cmake_minimum_required(VERSION 3.20)
 project(WARVR LANGUAGES CXX)
@@ -21,21 +21,14 @@ if(MSVC)
 endif()
 
 if(WIN32)
-  # The mod itself. d3d11/dxgi are loaded at runtime; d3d9 is only needed for its headers.
-  add_library(WARVR SHARED src/WARVR.cpp)
+  # The mod itself, built as dinput8.dll: WAR.exe loads it from its own folder when it starts, and the
+  # DirectInput calls are passed on to the system dinput8.dll (src/dinput8forward.cpp).
+  # d3d11/dxgi are loaded at runtime; d3d9 is only needed for its headers.
+  add_library(WARVR SHARED src/WARVR.cpp src/dinput8forward.cpp src/dinput8.def)
   target_link_libraries(WARVR PRIVATE user32)
-  set_target_properties(WARVR PROPERTIES OUTPUT_NAME "WARVR" PREFIX "")
+  set_target_properties(WARVR PROPERTIES OUTPUT_NAME "dinput8" PREFIX "")
   if(MSVC)
     target_link_options(WARVR PRIVATE /SAFESEH:NO)
-  endif()
-
-  # dinput8.dll next to WAR.exe: starts WARVR.dll with the game (no injector needed), passes DirectInput on.
-  add_library(dinput8proxy SHARED src/dinput8proxy.cpp src/dinput8proxy.def)
-  set_target_properties(dinput8proxy PROPERTIES OUTPUT_NAME "dinput8" PREFIX "")
-
-  add_executable(WARVRInjector src/injector.cpp)
-  if(MSVC)
-    target_compile_definitions(WARVRInjector PRIVATE _MBCS)
   endif()
 
   # The settings window (WARVR.ini, dxvk.conf, the private server's time of day).

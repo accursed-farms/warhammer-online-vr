@@ -26,7 +26,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force dist, dist/WARVR-docs, dist/WARVR-docs/licenses | Out-Null
-          Copy-Item build/Release/WARVR.dll, build/Release/dinput8.dll, build/Release/WARVRInjector.exe, build/Release/WARVRConfig.exe, build/Release/openvr_api.dll dist/
+          Copy-Item build/Release/dinput8.dll, build/Release/WARVRConfig.exe, build/Release/openvr_api.dll dist/
           Copy-Item "extras/ai-generated WARVR.ini.example" dist/WARVR.ini.example
           Copy-Item README.md dist/WARVR-README.md
           Copy-Item docs/*.md, extras/server-time-of-day.patch dist/WARVR-docs/

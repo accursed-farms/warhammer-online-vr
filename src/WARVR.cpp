@@ -2654,7 +2654,7 @@ static void VRBeforePresent(IDirect3DDevice9* dev)
                     Log("GPU path: d3d12.dll IS loaded in this process. dgVoodoo is most likely using its DIRECT3D 12 output; there is no D3D11 device to copy from. "
                         "Open dgVoodooCpl.exe -> DirectX tab -> Output API and choose Direct3D 11 (feature level 11.0), then restart the game.\n");
                 else if (gpu::g_s.createCalls == 0)
-                    Log("GPU path: the creation hooks saw no D3D11CreateDevice call at all. Either WARVR.dll was injected after the game's device already existed (inject earlier / start the injector first), "
+                    Log("GPU path: the creation hooks saw no D3D11CreateDevice call at all. Either the mod was loaded after the game's device already existed (put dinput8.dll next to WAR.exe so the game loads it at start), "
                         "or dgVoodoo is not the D3D9 layer in use.\n");
             }
         }
@@ -3148,7 +3148,7 @@ static void OpenLogEarly()
 
 // ---------------------------------------------------------------- hotkeys
 // All actions are Ctrl+Shift + <key>. Defaults are the numpad operator keys (they do not depend on
-// NumLock and the game does not bind them). Override any of them in WARVR.ini next to WARVR.dll:
+// NumLock and the game does not bind them). Override any of them in WARVR.ini next to WAR.exe:
 //     capture=F6
 //     scan=NUMPAD_MULTIPLY
 //     recenter=HOME
@@ -3360,7 +3360,7 @@ static DWORD WINAPI Worker(void*)
     OpenLogEarly();
     g_perturbQ = vrm::cameraDelta(vrm::rotY(-20.f * 3.14159265f / 180.f), 0.f);   // 20 deg yaw right
     Log("=== worker started (thread %lu) ===\n", GetCurrentThreadId());
-    { char by[64] = {}; Log("loaded by: %s\n", GetEnvironmentVariableA("WARVR_LOADED_BY", by, sizeof(by)) ? by : "an injector (WARVRInjector.exe or similar)"); }
+    { char me[MAX_PATH] = {}; GetModuleFileNameA(g_self, me, MAX_PATH); Log("mod file: %s\n", me); }
     LoadHotkeyConfig();
     if (g_gpuPathWanted) gpu::InstallCreateHooks(Log);       // must happen before dgVoodoo creates its D3D11 device
     else Log("GPU path: disabled by WARVR.ini (gpu_path=off)\n");

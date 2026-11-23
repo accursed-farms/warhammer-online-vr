@@ -16,11 +16,11 @@ machines and compare app frame rate, CPU frame time and missed frames. It also w
 
 ## Install
 
-1. In the Warhammer client folder (where `WARVR.dll` and `openvr_api.dll` are), rename Valve's `openvr_api.dll` to
+1. In the Warhammer client folder (where `dinput8.dll` and `openvr_api.dll` are), rename Valve's `openvr_api.dll` to
    `openvr_api.dll.real`.
 2. Put fakevr's `openvr_api.dll` there instead.
 3. Optional: copy `fakevr.ini.example` to `fakevr.ini` in the same folder and edit it.
-4. Start the game the usual way (injector, then the client) and press Ctrl+Shift+Numpad* to turn VR on.
+4. Start the game the usual way and press Ctrl+Shift+Numpad* to turn VR on.
    SteamVR doesn't need to be running.
 5. To go back to the real headset, delete fakevr's DLL and rename `openvr_api.dll.real` back.
 

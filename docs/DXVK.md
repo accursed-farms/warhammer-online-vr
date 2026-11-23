@@ -23,8 +23,8 @@ mod has to find dgVoodoo's private D3D11 device first (the "GPU path"), and fall
 2. Remove dgVoodoo's `D3D9.dll` (and its `D3DImm.dll`, `DDraw.dll`) from the Warhammer folder. Keep a backup.
 3. Download DXVK from https://github.com/doitsujin/dxvk/releases and copy **`x32\d3d9.dll`** into the Warhammer folder
    (WAR.exe is 32-bit; the x64 one will not load). DXVK needs a Vulkan 1.3 capable GPU and driver.
-4. Install WARVR as usual (`WARVR.dll`, `WARVRInjector.exe`, `openvr_api.dll`), run the injector, load a character,
-   press `Ctrl+Shift+Numpad*`.
+4. Install WARVR as usual (`dinput8.dll`, `openvr_api.dll` next to WAR.exe), start the game, load a character.
+   VR switches on by itself in the world (`Ctrl+Shift+Numpad*` toggles it).
 
 Nothing else changes; `vk_path=auto` is the default. `vk_path=off` in WARVR.ini disables the hand-off.
 
