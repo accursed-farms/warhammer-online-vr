@@ -9,6 +9,7 @@
 //        View' = View * Q4          (row-vector: applied after View, rotates about the eye)
 // where Q is the head rotation relative to a yaw-only reference, converted RH->LH.
 #pragma once
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <initializer_list>
@@ -755,6 +756,101 @@ inline bool hudQuadEyeSpace(const V3& eyeOff, const Mat3& q, const V3& headPos, 
         if (out[i][2] > nearZ) any = true;
     }
     return any;
+}
+
+// ---- HUD panel shape and lazy follow ------------------------------------------------------------------------------
+// One point of the HUD panel in the game camera's frame (x right, y up, z forward, metres from the default head
+// position), for texture coordinates u, v in [0,1] (v = 0 at the top).
+//   curved = false: a flat rectangle widthM wide at `distance` (the original panel).
+//   curved = true : a strip of a cylinder around the head with radius `distance`, spanning the same angle as the flat
+//                   panel would (so switching it on keeps the HUD's size and only bends it). Every column of the HUD is
+//                   then the same distance away and faces you, so the edges are as readable as the middle. Its height
+//                   is scaled to the arc's length, so the UI keeps its proportions (bending a strip of the full flat
+//                   height would make everything look stretched upwards, by ~19% with the default 2.4 m at 1.5 m).
+//   tiltDeg       : leans the panel back about its horizontal centre line (top farther away), so a panel placed below
+//                   eye level (vertM < 0) faces a downward glance. 0 = upright.
+//   yaw           : turns the whole panel about the vertical axis through the head (radians, + = to the right).
+inline V3 hudPanelPoint(float u, float v, float distance, float widthM, float uiAspect, float vertM, bool curved,
+                        float tiltDeg, float yaw) {
+    float hh = widthM / uiAspect * 0.5f;
+    const float half = std::atan(widthM * 0.5f / distance);
+    if (curved && half > 1e-4f) hh *= 2.f * half * distance / widthM;     // arc length / flat width
+    const float yl = hh - v * 2.f * hh;
+    const float t = tiltDeg * 3.14159265f / 180.f;
+    const float dy = yl * std::cos(t), dz = yl * std::sin(t);
+    float x, z;
+    if (curved) {
+        const float th = (u - 0.5f) * 2.f * half, r = distance + dz;
+        x = r * std::sin(th); z = r * std::cos(th);
+    }
+    else { x = (u - 0.5f) * widthM; z = distance + dz; }
+    const float cy = std::cos(yaw), sy = std::sin(yaw);
+    return { x * cy + z * sy, vertM + dy, -x * sy + z * cy };
+}
+// The same transform hudQuadEyeSpace applies to its corners: game frame -> this eye's space.
+inline void hudPointToEye(const V3& pt, const V3& eyeOff, const Mat3& q, const V3& headPos, float out[3]) {
+    const float rel[3] = { pt.x - headPos.x, pt.y - headPos.y, pt.z - headPos.z };
+    for (int c = 0; c < 3; ++c) out[c] = rel[0]*q.m[0][c] + rel[1]*q.m[1][c] + rel[2]*q.m[2][c];
+    out[0] -= eyeOff.x; out[1] -= eyeOff.y; out[2] -= eyeOff.z;
+}
+// Heading of the head in the game frame (radians, + = right), for the head rotation q as used above.
+inline float headYawOf(const Mat3& q) { return std::atan2(q.m[0][2], q.m[2][2]); }
+inline float wrapPi(float a) {
+    while (a > 3.14159265f) a -= 6.2831853f;
+    while (a < -3.14159265f) a += 6.2831853f;
+    return a;
+}
+// Lazy follow: the panel stays where it is while you look around it, and once your heading is more than startDeg away
+// it glides after you (time constant tau seconds) until it is back within 2 degrees. *following carries that state.
+inline float lazyFollowYaw(float panelYaw, float headYaw, float dt, float startDeg, float tau, bool* following) {
+    const float d = wrapPi(headYaw - panelYaw), ad = std::fabs(d) * 180.f / 3.14159265f;
+    if (!*following && ad > startDeg) *following = true;
+    if (*following) {
+        if (ad < 2.f) { *following = false; return panelYaw; }
+        const float k = (dt <= 0.f) ? 0.f : (dt >= tau * 4.f ? 1.f : 1.f - std::exp(-dt / tau));
+        return wrapPi(panelYaw + d * k);
+    }
+    return panelYaw;
+}
+
+// ---- laser pointer ---------------------------------------------------------------------------------------------------
+// Direction of the game's mouse-pick ray in its camera's axes (x right, y up, z forward), for the cursor at texture
+// coordinates u, v (v = 0 at the top) and the camera's Gamebryo frustum {left, right, top, bottom} at unit distance.
+// Normalised. This is the ray the game itself uses to decide what is under the mouse.
+inline V3 pickRayCamera(float u, float v, const float fr[4]) {
+    const float x = fr[0] + u * (fr[1] - fr[0]), y = fr[2] + v * (fr[3] - fr[2]);
+    const float n = std::sqrt(x * x + y * y + 1.f);
+    return { x / n, y / n, 1.f / n };
+}
+// Row vector [x y z 1] times a 4x4 matrix (D3D convention): clip-space position.
+inline void xformPoint(const float p[3], const float m[4][4], float out[4]) {
+    for (int c = 0; c < 4; ++c) out[c] = p[0] * m[0][c] + p[1] * m[1][c] + p[2] * m[2][c] + m[3][c];
+}
+// Clip the segment a-b (clip space) to w >= eps, in place. False if nothing is left in front of the eye.
+inline bool clipSegmentW(float a[4], float b[4], float eps) {
+    if (a[3] < eps && b[3] < eps) return false;
+    if (a[3] < eps || b[3] < eps) {
+        float* in = a[3] >= eps ? a : b; float* out = a[3] >= eps ? b : a;
+        const float t = (in[3] - eps) / (in[3] - out[3]);
+        for (int c = 0; c < 4; ++c) out[c] = in[c] + (out[c] - in[c]) * t;
+    }
+    return true;
+}
+// Probe i of n along the ray, log-spaced from dmin to dmax (any units).
+inline float laserProbeDistance(int i, int n, float dmin, float dmax) {
+    if (n < 2) return dmin;
+    return dmin * std::pow(dmax / dmin, (float)i / (float)(n - 1));
+}
+// Where the ray hits, from the probes' visibility (1 visible, 0 hidden behind something, -1 not tested / off screen):
+// the first hidden probe that follows a visible one. Returns the geometric mean of the two distances, or -1 (sky,
+// nothing hit, or no visible probe to anchor on).
+inline float laserHitDistance(const int* state, const float* dist, int n) {
+    int lastVisible = -1;
+    for (int i = 0; i < n; ++i) {
+        if (state[i] == 1) lastVisible = i;
+        else if (state[i] == 0 && lastVisible >= 0) return std::sqrt(dist[lastVisible] * dist[i]);
+    }
+    return -1.f;
 }
 
 // ---- planar water reflection (phase 7f) --------------------------------------------------------------------------
