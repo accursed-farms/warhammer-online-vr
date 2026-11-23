@@ -1,6 +1,31 @@
 Experimental VR mod for Warhammer Online: Age of Reckoning
 by Ross Scott
 
+## Maintained version
+Ross Scott made this mod. Since November 2026 Lucas Traba (lucastraba) maintains it here, with Ross's permission, so the updates and improvements since the original are Lucas's responsibility, not Ross's. Ross's original description and instructions are kept below.
+
+-AI disclosure: the original version was completely vibe-coded (see the description below). The changes since then were also written with AI (Claude), and checked with unit tests, under Wine on Linux with a fake headset, and, where noted, by Ross on Windows with a real headset.
+
+-Download: the Releases page of this repository (WARVR.dll, WARVRInjector.exe, WARVRConfig.exe, openvr_api.dll, an example WARVR.ini). The files in bin\ are Ross's original build.
+
+-Stutter when a map first loads: with DXVK (below) the game can stutter for a while when you first load a map or see something new. That is DXVK preparing the game's shaders the first time they are used, not a crash; it settles down, and is usually less on later runs. More in docs\DXVK.md.
+
+-DXVK instead of dgVoodoo: the fix for the CPU bottleneck. Ross measured 90 fps across the board on it, including where dgVoodoo dropped frames. See docs\DXVK.md. With your usual dgVoodoo setup the mod still works as before.
+
+-Settings window: WARVRConfig.exe (next to the injector) sets the main options without editing WARVR.ini by hand: VR on when you enter the world, HUD style, laser, draw distance, lazy_state, the log, DXVK texture filtering and DXVK's own log. It only changes the lines it owns, so a hand-edited WARVR.ini keeps everything else. It can also set the time of day on your own ProjectWAR server, after a two-line server change (docs\SERVER_TIME.md).
+
+-HUD shape: Ctrl+Shift+H switches the HUD between flat (as before), curved (bent around you, so the minimap and chat at the edges face you) and low (curved, lower and leaned back, a glance down). hud_style=flat|curved|low in WARVR.ini picks the one it starts with.
+
+-Laser pointer: Ctrl+Shift+L (or laser=on in WARVR.ini) draws a red beam along the line the game itself uses for the mouse, ending in a dot on whatever the cursor is really pointing at. laser_origin=hand|eyes picks where the beam starts, laser_width=3 sets its width in pixels. VR only.
+
+-lazy_state=on in WARVR.ini (with dgVoodoo): skips some of the extra work the mod does for every object.
+
+-draw_distance now also works without VR (flat screen).
+
+-Problems: set log=on in WARVR.ini (or tick it in WARVRConfig.exe) and open an issue on this repository with %TEMP%\WARVR.log.
+
+-Building it yourself: build.bat (Visual Studio), or tools\build-cross.sh on Linux. tools\fakevr is a fake headset for testing without one.
+
 ## Description:
 This mod will activate full 3D VR rendering when inside Warhammer Online and should scale to any resolution.
 

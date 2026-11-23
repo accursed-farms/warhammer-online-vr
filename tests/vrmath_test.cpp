@@ -684,6 +684,89 @@ int main() {
         printf("rendered forward z with lock: %.3f (head pitch alone gives sin(20 deg) = 0.342)\n", fs.z);
         CHECK(std::fabs(std::fabs(fs.z) - 0.342f) < 0.02f);
     }
+    {   // HUD panel shape: flat matches the original quad, curved keeps the span and puts every column at the radius
+        printf("\n[hud panel shape / lazy follow]\n");
+        const V3 eo{ 0, 0, 0 }, zero{ 0, 0, 0 };
+        float c[4][3];
+        CHECK(hudQuadEyeSpace(eo, identity(), zero, 1.5f, 2.4f, 16.f / 9.f, -0.1f, 0.05f, c));
+        const float uv[4][2] = { { 0, 0 }, { 1, 0 }, { 0, 1 }, { 1, 1 } };
+        for (int i = 0; i < 4; ++i) {
+            const V3 p = hudPanelPoint(uv[i][0], uv[i][1], 1.5f, 2.4f, 16.f / 9.f, -0.1f, false, 0.f, 0.f);
+            CHECK(std::fabs(p.x - c[i][0]) < 1e-5f && std::fabs(p.y - c[i][1]) < 1e-5f && std::fabs(p.z - c[i][2]) < 1e-5f);
+        }
+        for (int i = 0; i <= 8; ++i) {
+            const V3 p = hudPanelPoint(i / 8.f, 0.5f, 1.5f, 2.4f, 16.f / 9.f, 0.f, true, 0.f, 0.f);
+            CHECK(std::fabs(std::sqrt(p.x * p.x + p.z * p.z) - 1.5f) < 1e-4f);
+        }
+        const V3 eL = hudPanelPoint(0.f, 0.5f, 1.5f, 2.4f, 16.f / 9.f, 0.f, true, 0.f, 0.f);
+        const V3 fL = hudPanelPoint(0.f, 0.5f, 1.5f, 2.4f, 16.f / 9.f, 0.f, false, 0.f, 0.f);
+        printf("left edge angle: curved %.2f deg, flat %.2f deg\n", std::atan2(eL.x, eL.z) * 57.29578f, std::atan2(fL.x, fL.z) * 57.29578f);
+        CHECK(std::fabs(std::atan2(eL.x, eL.z) - std::atan2(fL.x, fL.z)) < 1e-4f);
+        {   // curved keeps the UI's proportions: arc length / height = the UI's aspect (no vertical stretch)
+            const V3 cT = hudPanelPoint(0.5f, 0.f, 1.5f, 2.4f, 16.f / 9.f, 0.f, true, 0.f, 0.f);
+            const V3 cB = hudPanelPoint(0.5f, 1.f, 1.5f, 2.4f, 16.f / 9.f, 0.f, true, 0.f, 0.f);
+            const float arc = 2.f * std::atan(1.2f / 1.5f) * 1.5f, height = cT.y - cB.y;
+            printf("curved HUD: arc %.4f m, height %.4f m, aspect %.4f (UI 1.7778)\n", arc, height, arc / height);
+            CHECK(std::fabs(arc / height - 16.f / 9.f) < 1e-3f);
+            const V3 fT = hudPanelPoint(0.5f, 0.f, 1.5f, 2.4f, 16.f / 9.f, 0.f, false, 0.f, 0.f);
+            CHECK(std::fabs(fT.y - 2.4f / (16.f / 9.f) * 0.5f) < 1e-5f);      // flat unchanged
+        }
+        // tilt: top leans back, bottom comes forward; the centre line stays
+        const V3 top = hudPanelPoint(0.5f, 0.f, 1.5f, 2.4f, 16.f / 9.f, -0.3f, false, 20.f, 0.f);
+        const V3 bot = hudPanelPoint(0.5f, 1.f, 1.5f, 2.4f, 16.f / 9.f, -0.3f, false, 20.f, 0.f);
+        const V3 mid = hudPanelPoint(0.5f, 0.5f, 1.5f, 2.4f, 16.f / 9.f, -0.3f, false, 20.f, 0.f);
+        CHECK(top.z > 1.5f && bot.z < 1.5f && std::fabs(mid.z - 1.5f) < 1e-5f && std::fabs(mid.y + 0.3f) < 1e-5f);
+        // yaw: the panel centre ends up at that heading, and headYawOf reads a head turn back
+        const V3 yc = hudPanelPoint(0.5f, 0.5f, 1.5f, 2.4f, 16.f / 9.f, 0.f, true, 0.f, 0.5f);
+        CHECK(std::fabs(std::atan2(yc.x, yc.z) - 0.5f) < 1e-4f);
+        const Mat3 q30 = cameraDelta(rotY(-30.f * 3.14159265f / 180.f), 0.f);
+        const float hy = headYawOf(q30);
+        printf("headYawOf(30 deg turn) = %.2f deg\n", hy * 57.29578f);
+        CHECK(std::fabs(std::fabs(hy) - 30.f * 3.14159265f / 180.f) < 1e-3f);
+        // a point straight ahead of the turned head lands at eye-space x = 0
+        float e[3]; hudPointToEye(hudPanelPoint(0.5f, 0.5f, 1.5f, 2.4f, 16.f / 9.f, 0.f, true, 0.f, hy), eo, q30, zero, e);
+        printf("panel centre at head heading -> eye space (%.3f, %.3f, %.3f)\n", e[0], e[1], e[2]);
+        CHECK(std::fabs(e[0]) < 1e-3f && e[2] > 1.49f);
+        // lazy follow: inside the dead zone nothing moves; past it the panel glides and then stops
+        bool fol = false;
+        CHECK(lazyFollowYaw(0.f, 0.5f, 0.016f, 45.f, 0.3f, &fol) == 0.f && !fol);
+        float y = 0.f;
+        for (int i = 0; i < 400; ++i) y = lazyFollowYaw(y, 1.2f, 0.016f, 45.f, 0.3f, &fol);
+        printf("lazy follow after 6.4 s towards 68.8 deg: %.2f deg, following=%d\n", y * 57.29578f, fol ? 1 : 0);
+        CHECK(std::fabs(y - 1.2f) < 2.f / 57.29578f && !fol);
+        CHECK(std::fabs(wrapPi(3.5f) - (3.5f - 6.2831853f)) < 1e-5f);
+    }
+    {   // laser pointer helpers
+        printf("\n[laser pointer]\n");
+        const float fr[4] = { -0.8f, 0.8f, 0.45f, -0.45f };
+        const V3 c = pickRayCamera(0.5f, 0.5f, fr);
+        CHECK(std::fabs(c.x) < 1e-6f && std::fabs(c.y) < 1e-6f && std::fabs(c.z - 1.f) < 1e-6f);
+        const V3 tl = pickRayCamera(0.f, 0.f, fr);                       // top-left corner: left and up
+        CHECK(tl.x < 0.f && tl.y > 0.f && std::fabs(tl.x / tl.z + 0.8f) < 1e-5f && std::fabs(tl.y / tl.z - 0.45f) < 1e-5f);
+        const V3 br = pickRayCamera(1.f, 1.f, fr);
+        CHECK(br.x > 0.f && br.y < 0.f);
+        // a point on the ray projects to the cursor position with the matching projection
+        float P[4][4]; perspFromFrustum(fr[0], fr[1], fr[2], fr[3], 1.f, 100.f, P);
+        const V3 r = pickRayCamera(0.25f, 0.75f, fr);
+        const float pt[3] = { r.x * 10.f, r.y * 10.f, r.z * 10.f };
+        float cl[4]; xformPoint(pt, P, cl);
+        const float sx = (cl[0] / cl[3] + 1.f) * 0.5f, sy = (1.f - cl[1] / cl[3]) * 0.5f;
+        printf("ray point at u=0.25 v=0.75 projects to (%.4f, %.4f)\n", sx, sy);
+        CHECK(std::fabs(sx - 0.25f) < 1e-4f && std::fabs(sy - 0.75f) < 1e-4f);
+        // clipping against w
+        float a[4] = { 0, 0, 0, -1.f }, b[4] = { 0, 0, 0, 3.f };
+        CHECK(clipSegmentW(a, b, 0.5f) && std::fabs(a[3] - 0.5f) < 1e-5f && b[3] == 3.f);
+        float a2[4] = { 0, 0, 0, -1.f }, b2[4] = { 0, 0, 0, 0.1f };
+        CHECK(!clipSegmentW(a2, b2, 0.5f));
+        // probes and hit
+        CHECK(std::fabs(laserProbeDistance(0, 5, 1.f, 16.f) - 1.f) < 1e-5f && std::fabs(laserProbeDistance(4, 5, 1.f, 16.f) - 16.f) < 1e-3f);
+        CHECK(std::fabs(laserProbeDistance(2, 5, 1.f, 16.f) - 4.f) < 1e-4f);
+        const float d[6] = { 1, 2, 4, 8, 16, 32 };
+        const int s1[6] = { 1, 1, 1, 0, 0, 0 };   CHECK(std::fabs(laserHitDistance(s1, d, 6) - std::sqrt(32.f)) < 1e-4f);
+        const int s2[6] = { 1, 1, 1, 1, 1, 1 };   CHECK(laserHitDistance(s2, d, 6) < 0.f);      // sky
+        const int s3[6] = { -1, 0, 1, -1, 0, 0 }; CHECK(std::fabs(laserHitDistance(s3, d, 6) - 8.f) < 1e-4f);   // hidden before any visible probe is ignored; first hidden after a visible one counts
+        const int s4[6] = { 0, 0, 0, 0, 0, 0 };   CHECK(laserHitDistance(s4, d, 6) < 0.f);
+    }
     printf(fails ? "\n%d FAILURES\n" : "\nALL TESTS PASSED\n", fails);
     return fails ? 1 : 0;
 }

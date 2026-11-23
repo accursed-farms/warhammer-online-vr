@@ -51,6 +51,7 @@
 #include "openvr_head.h"
 #include "vrdisplay.h"
 #include "gpupath.h"
+#include "vkpath.h"
 #if defined(__GNUC__)
 #pragma GCC target("sse2")
 #endif
@@ -252,6 +253,26 @@ static float g_prevPoseYaw = 0.f;
 static bool g_stereoSBS = true;
 static int g_hudMode = 0;                        // 0 = floating 3D rectangle, 1 = fill the whole eye view
 static float g_hudDistance = 1.5f, g_hudWidth = 2.4f, g_hudVert = 0.0f;   // metres
+// HUD panel shape (hud_anchor=world only). hud_style picks a preset; the single keys after it override it.
+//   flat   = the original flat rectangle (default)
+//   curved = the same size, bent around you so the edges face you and are as far away as the middle
+//   low    = curved, lowered and leaned back: the world ahead is clearer, the HUD is a glance down
+static int g_hudStyle = 0;                         // 0 flat, 1 curved, 2 low, 3 custom (single keys set)
+static bool g_hudCurve = false;
+static float g_hudTilt = 0.f;                      // degrees, top leans away
+static bool g_hudFollow = false;                   // lazy follow: the panel glides after your head when you look far away
+static float g_hudFollowDeg = 50.f;                // ...once your heading is this far from the panel centre
+static float g_hudYaw = 0.f;                       // current panel heading (radians, + = right), lazy follow only
+static bool g_hudFollowing = false;
+static float g_hudVertUser = 0.0f;                 // hud_vertical as set in WARVR.ini; "low" sits 0.35 m below it
+static const char* HudStyleName(int s) { return s == 0 ? "flat" : s == 1 ? "curved" : s == 2 ? "low" : "custom"; }
+static void ApplyHudStyle(int st)
+{
+    g_hudStyle = st;
+    if (st == 0) { g_hudCurve = false; g_hudTilt = 0.f;  g_hudVert = g_hudVertUser; }
+    if (st == 1) { g_hudCurve = true;  g_hudTilt = 0.f;  g_hudVert = g_hudVertUser; }
+    if (st == 2) { g_hudCurve = true;  g_hudTilt = 20.f; g_hudVert = g_hudVertUser - 0.35f; }
+}
 static float g_regs[256][4];                     // shadow of the vertex-shader float constants WAR uploaded
 static float g_pregs[256][4];                    // shadow of the pixel-shader float constants (phase 7d)
 static vrm::ScanKeys g_scanKeys = {};            // what the register scanners look for (left-eye matrices), and a version that changes with them
@@ -298,10 +319,28 @@ static const char* g_gpuWhy = "";
 static unsigned g_desktopEvery = 0;              // INI desktop_every: present to the desktop every Nth frame, 0 = never while in VR
 static bool g_cursorOn = true;                   // INI cursor=on|off, key M
 static float g_cursorSize = 0.045f;              // arrow height as a fraction of the HUD height
+// Laser pointer (INI laser=on, key L): a beam along the game's own mouse-pick ray, ending in a dot where it hits the
+// world, so it is obvious what the cursor points at. The hit is found with occlusion queries against this frame's depth.
+static bool g_laserOn = false;
+static bool g_laserDone = false;                  // drawn this frame already (reset after Present)
+static bool g_laserAtClearLogged = false;
+static int g_laserOrigin = 0;                     // 0 = from low and to the right of you ("hand"), 1 = from your eyes
+static float g_laserPx = 3.f;                     // beam width in pixels
+static bool g_pickValid = false;                  // the game's own camera of the last VR frame: what its mouse picking uses
+static float g_pickPos[3], g_pickR[3], g_pickU[3], g_pickF[3], g_pickFr[4];
 static HWND g_gameHwnd = nullptr;
 static int g_resMode = 2;                        // INI vr_resolution: 0 = desktop, 1 = steamvr (always), 2 = auto (steamvr when the GPU hand-off is available)
 static double g_maxPixels = 0, g_renderScale = 1.0;   // 0 = no pixel budget: SteamVR's exact size, only clamped to what the D3D9 device allows
 static unsigned g_gpuSubmitErrStreak = 0;        // consecutive Submit() errors while the GPU hand-off was in use
+// DXVK hand-off (vkpath.h): used when DXVK's d3d9.dll is the D3D9 layer instead of dgVoodoo.
+static bool g_vkPathWanted = true;               // INI vk_path=auto|off
+static bool g_autoVr = false;                    // INI auto_vr=on: switch VR on once, at the first in-world frame (testing without hotkeys)
+static std::atomic<bool> g_autoVrRequest{false}; // set by Present, run by the worker thread like a hotkey
+static bool g_isDxvk = false;                    // the d3d9.dll the game uses is DXVK (decided in the Direct3DCreate9 hook)
+static vkp::Handoff g_vk;
+static bool g_vkActive = false;                  // the last frame went to SteamVR as a Vulkan image
+static unsigned g_vkFrames = 0, g_vkFails = 0, g_vkSubmitErrStreak = 0;
+static const char* g_vkWhy = "";
 static bool g_redirect = false;                  // the game's main render target is replaced by our own VR-sized one
 static IDirect3DSurface9 *g_vrRT = nullptr, *g_vrDS = nullptr, *g_bbSurf = nullptr, *g_autoDS = nullptr;
 static UINT g_logW = 0, g_logH = 0;              // the size the GAME believes its screen is
@@ -473,6 +512,40 @@ static void OnDraw(IDirect3DDevice9* self, const char* kind, UINT prims)
             (unsigned long)g_rsShadow[D3DRS_CLIPPLANEENABLE]);
 }
 
+// ---- lazy state restore (INI lazy_state=on, experimental) ---------------------------------------------------
+// After the right-eye copy of a world draw the device still has the right eye's viewport and constant patches. Restoring
+// them at once costs 1 + (number of patches) D3D calls per world draw, every one of which goes through the translation layer
+// on the game thread. With lazy_state=on they are restored only when something actually needs the game's values: the next
+// draw, a Clear, the frame's end. Patched registers the game uploads again in the meantime need no restore at all.
+// The game's own values are always in the shadow registers (g_regs / g_pregs), so a restore is just a re-upload from there.
+static bool g_lazyState = false;
+static bool g_vpDirty = false;                   // device viewport is an eye viewport, not g_devVP
+struct LazyPatch { int16_t reg, count; bool ps; };
+static LazyPatch g_lazyPending[32];
+static int g_lazyN = 0;
+static unsigned g_lazySavedCalls = 0, g_lazyFlushedCalls = 0;
+static void LazyCovered(bool ps, UINT start, UINT count)         // the game re-uploaded [start, start+count): those patches are gone
+{
+    for (int i = 0; i < g_lazyN; ) {
+        const LazyPatch& p = g_lazyPending[i];
+        if (p.ps == ps && (UINT)p.reg >= start && (UINT)(p.reg + p.count) <= start + count) { g_lazyPending[i] = g_lazyPending[--g_lazyN]; ++g_lazySavedCalls; }
+        else ++i;
+    }
+}
+static void LazyFlushConsts(IDirect3DDevice9* dev)
+{
+    for (int i = 0; i < g_lazyN; ++i) {
+        const LazyPatch& p = g_lazyPending[i];
+        if (p.ps) g_origSetPSConstF(dev, (UINT)p.reg, g_pregs[p.reg], (UINT)p.count);
+        else      g_origSetVSConstF(dev, (UINT)p.reg, g_regs[p.reg], (UINT)p.count);
+    }
+    g_lazyFlushedCalls += (unsigned)g_lazyN;
+    g_lazyN = 0;
+}
+static void LazyFlushVP(IDirect3DDevice9* dev) { if (g_vpDirty) { g_origSetViewport(dev, &g_devVP); g_vpDirty = false; ++g_lazyFlushedCalls; } }
+static void LazyFlush(IDirect3DDevice9* dev) { LazyFlushConsts(dev); LazyFlushVP(dev); }
+static void LazyForget() { g_lazyN = 0; g_vpDirty = false; }
+
 // ---- stereo draw duplication -----------------------------------------------------------------------------
 static void SetVP(IDirect3DDevice9* dev, int x, int y, int w, int h)
 {
@@ -531,6 +604,7 @@ static void EyeViewportRect(int eye, int rtW, int rtH, bool hud, int* ox, int* o
 // All of the game's HUD draws of a frame are rendered ONCE into g_hudTex (the whole 2D UI at a resolution of our choosing). At the
 // end of the frame it is drawn as a flat quad per eye, placed in space with that eye's real projection, so it behaves like a
 // physical panel: it stays put, looks tilted from the side, and leaves the view naturally.
+static void LaserRelease();
 static void VRHudRelease()
 {
     if (g_hudSavedRT) { g_hudSavedRT->Release(); g_hudSavedRT = nullptr; }
@@ -683,6 +757,10 @@ template <class F>
 static HRESULT StereoDrawImpl(IDirect3DDevice9* dev, F&& issue)
 {
     const int kind = ClassifyDraw();
+    if (g_lazyN || g_vpDirty) {                                // lazy_state: the left-eye copy and every other draw need the game's constants;
+        LazyFlushConsts(dev);                                  // a world draw sets its own viewport right away, everything else needs the game's
+        if (kind != 1) LazyFlushVP(dev);
+    }
     if (kind == 0) return issue();
     if (!g_haveGameVP) { if (FAILED(dev->GetViewport(&g_gameVP))) return issue(); g_haveGameVP = true; g_devVP = g_gameVP; }
     const int rtW = (int)(g_curRTw ? g_curRTw : g_bbW), rtH = (int)(g_curRTh ? g_curRTh : g_bbH);
@@ -788,8 +866,14 @@ static HRESULT StereoDrawImpl(IDirect3DDevice9* dev, F&& issue)
                     if (nv > 1 || npx > 0) ++g_extraPatchDraws;
                     EyeRegion(1, rtW, rtH, &x, &y, &w, &h); SetVP(dev, x, y, w, h);
                     issue();
-                    for (int i = npx - 1; i >= 0; --i) g_origSetPSConstF(dev, (UINT)pp[i].reg, savedP[i], (UINT)pp[i].count);
-                    for (int i = nv - 1; i >= 0; --i) g_origSetVSConstF(dev, (UINT)pv[i].reg, savedV[i], (UINT)pv[i].count);
+                    if (g_lazyState && g_lazyN + nv + npx <= (int)(sizeof(g_lazyPending) / sizeof(g_lazyPending[0]))) {
+                        // leave the right eye's values in place; restored from the shadow registers when needed (see LazyFlush)
+                        for (int i = 0; i < npx; ++i) g_lazyPending[g_lazyN++] = { (int16_t)pp[i].reg, (int16_t)pp[i].count, true };
+                        for (int i = 0; i < nv; ++i)  g_lazyPending[g_lazyN++] = { (int16_t)pv[i].reg, (int16_t)pv[i].count, false };
+                    } else {
+                        for (int i = npx - 1; i >= 0; --i) g_origSetPSConstF(dev, (UINT)pp[i].reg, savedP[i], (UINT)pp[i].count);
+                        for (int i = nv - 1; i >= 0; --i) g_origSetVSConstF(dev, (UINT)pv[i].reg, savedV[i], (UINT)pv[i].count);
+                    }
                     ++g_dupWorld;
                     if (g_capturing && g_stereoCapLogged < 3000) {
                         ++g_stereoCapLogged;
@@ -820,7 +904,8 @@ static HRESULT StereoDrawImpl(IDirect3DDevice9* dev, F&& issue)
                 ++g_dupWorldFFP;
             }
         } else ++g_dupUnmatched;
-        g_origSetViewport(dev, &g_devVP);
+        if (g_lazyState) g_vpDirty = true;                     // restored by the next draw that needs it
+        else g_origSetViewport(dev, &g_devVP);
         return hr;
     }
 
@@ -956,6 +1041,7 @@ static HRESULT WINAPI HookSetVSConstF(IDirect3DDevice9* s, UINT start, const flo
     if (g_capturing && data && count)
         Cap("VS_CONST start=c%u count=%u  first=[%.5g %.5g %.5g %.5g]%s", start, count, data[0], data[1], data[2], data[3], tag);
     if (send && count && start + count <= 256) { memcpy(g_regs[start], send, count * 4 * sizeof(float)); g_vsScan.touch((int)start, (int)count); }
+    if (g_lazyN) LazyCovered(false, start, count);
     g_lastUpStart = start; g_lastUpCount = count;
     PF_SAMPLE_BEGIN(pfs);
     const HRESULT pfr = g_origSetVSConstF(s, start, send, count);
@@ -967,6 +1053,7 @@ static HRESULT WINAPI HookSetVSConstF(IDirect3DDevice9* s, UINT start, const flo
 static HRESULT WINAPI HookSetPSConstF(IDirect3DDevice9* s, UINT start, const float* data, UINT count)
 {
     if (data && count && start + count <= 256) { memcpy(g_pregs[start], data, count * 4 * sizeof(float)); g_psScan.touch((int)start, (int)count); }
+    if (g_lazyN) LazyCovered(true, start, count);
     if (g_capturing && data && count) Cap("PS_CONST start=c%u count=%u  first=[%.5g %.5g %.5g %.5g]", start, count, data[0], data[1], data[2], data[3]);
     PF_SAMPLE_BEGIN(pfs);
     const HRESULT pfr = g_origSetPSConstF(s, start, data, count);
@@ -1063,6 +1150,7 @@ static HRESULT WINAPI HookSetRenderTarget(IDirect3DDevice9* s, DWORD idx, IDirec
     }
     if (idx == 0 && g_hudBound) VRHudGameTookOver(s);
     if (idx == 0 && use && !g_rtIsMain) g_lastOffscreenRT = use;
+    if (idx == 0) g_vpDirty = false;                                         // D3D9 resets the viewport to the whole new target anyway
     HRESULT hr = g_origSetRenderTarget(s, idx, use);
     if (g_redirect && idx == 0 && use == g_vrRT && g_origSetDS) g_origSetDS(s, g_vrDS);   // our (large) depth buffer goes with it
     if (idx == 0 && g_redirect) ApplyColorWriteMask(s);
@@ -1105,14 +1193,24 @@ static HRESULT WINAPI HookSetViewport(IDirect3DDevice9* s, const D3DVIEWPORT9* v
         use = &scaled;
     }
     if (use) g_devVP = *use;
+    g_vpDirty = false;
     return g_origSetViewport(s, use);
 }
 
+static void VRDrawLaser(IDirect3DDevice9* dev);
 static HRESULT WINAPI HookClear(IDirect3DDevice9* s, DWORD c, const D3DRECT* r, DWORD f, D3DCOLOR col, float z, DWORD st)
 {
     ++g_stats.clears;
+    LazyFlushVP(s);                                                            // Clear without rects clears the viewport
     if (g_redirect && g_rtIsMain && (f & D3DCLEAR_TARGET)) col |= 0xFF000000u;       // X8 semantics: alpha is always 1
     Cap("CLEAR rects=%lu flags=0x%lX color=0x%08lX z=%.3f", (unsigned long)c, (unsigned long)f, (unsigned long)col, z);
+    // The game clears depth on its own before drawing the 2D UI: last moment the world's depth is there for the laser.
+    if (g_laserOn && g_vrActive && g_redirect && g_rtIsMain && (f & D3DCLEAR_ZBUFFER) && !(f & D3DCLEAR_TARGET) && !g_hudBound &&
+        g_frameMainPerspDraws > 50 && !g_laserDone) {
+        LazyFlush(s);
+        VRDrawLaser(s);
+        if (g_laserDone && g_log && !g_laserAtClearLogged) { g_laserAtClearLogged = true; Log("LASER: drawn at the game's depth clear (before its 2D UI)\n"); }
+    }
     if (g_redirect && g_rtIsMain && c && r && c <= 16 && g_logW && g_logH) {
         D3DRECT sc[16];
         const float sx = (float)g_bbW / (float)g_logW, sy = (float)g_bbH / (float)g_logH;
@@ -1170,6 +1268,8 @@ struct CamTakeover {
 };
 static CamTakeover g_cam;
 static float g_drawDistScale = 1.0f;             // INI draw_distance: multiplies the main camera's far plane (1 = the game's own setting)
+static bool g_drawDistFlat = true;               // INI draw_distance_flat: also apply draw_distance when VR is off (on by default)
+static bool g_flatFarLogged = false;
 static float g_lastFarEngine = 0, g_lastFarUsed = 0;
 static CamTakeover g_camRefl;                    // the reflection camera object (planar water), same layout as the main camera
 static bool g_gameBasisValid = false;            // the game's own (unsteered) camera basis, as last passed to SetCamera for the main view
@@ -1230,7 +1330,7 @@ static void ComputeSteered(const Vec3f& pos, const Vec3f& right, const Vec3f& up
     if (g_pitchLock.load() && g_vrActive) vrm::levelBasis(right, up, fwd, &r0, &u0, &f0);       // remove the mouse's pitch, keep its heading
     vrm::rotateBasis(q, r0, u0, f0, &o->right, &o->up, &o->fwd);
     memcpy(o->fr, frustum, sizeof(o->fr));
-    if (g_vrActive && g_drawDistScale > 1.0001f && o->fr[5] > 1.f) { g_lastFarEngine = o->fr[5]; o->fr[5] *= g_drawDistScale; g_lastFarUsed = o->fr[5]; }
+    if ((g_vrActive || g_drawDistFlat) && g_drawDistScale > 1.0001f && o->fr[5] > 1.f) { g_lastFarEngine = o->fr[5]; o->fr[5] *= g_drawDistScale; g_lastFarUsed = o->fr[5]; }
     o->pos = pos;
     o->vr = false;
     if (g_vrActive && g_eyeParamsOk && !g_perturb.load()) {
@@ -1328,6 +1428,10 @@ static void WAR_THISCALL HookSetCamera(void* self, void* edx, const Vec3f* pos, 
     else {
         bool handled = false;
         const vrm::Mat3* q = ActiveRotation();
+        // Flat (VR off) with draw_distance: run the same camera path with no rotation, so only the far plane changes.
+        static const vrm::Mat3 kNoRotation = vrm::identity();
+        const bool flatFar = !q && !g_vrActive && g_drawDistFlat && g_drawDistScale > 1.0001f && g_rtIsMain;
+        if (flatFar) q = &kNoRotation;
         if (camObj && q && g_cullTakeover.load() && g_cam.verified >= 0 && !IsOnStack(frustum)) {
             uint8_t* cam = const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(frustum)) - 0xF0;
             Vec3f oPos = *pos, oFwd = *fwd, oUp = *up, oRight = *right;
@@ -1367,6 +1471,13 @@ static void WAR_THISCALL HookSetCamera(void* self, void* edx, const Vec3f* pos, 
             }
             if (ok) {
                 g_gameR = oRight; g_gameU = oUp; g_gameF = oFwd; g_gameBasisValid = true;     // the game's own camera, for recognising its reflection
+                if (g_vrActive) {                                                               // ...and for the laser pointer
+                    g_pickPos[0] = oPos.x; g_pickPos[1] = oPos.y; g_pickPos[2] = oPos.z;
+                    g_pickR[0] = oRight.x; g_pickR[1] = oRight.y; g_pickR[2] = oRight.z;
+                    g_pickU[0] = oUp.x; g_pickU[1] = oUp.y; g_pickU[2] = oUp.z;
+                    g_pickF[0] = oFwd.x; g_pickF[1] = oFwd.y; g_pickF[2] = oFwd.z;
+                    memcpy(g_pickFr, oFr, sizeof(g_pickFr)); g_pickValid = true;
+                }
                 ComputeSteered(oPos, oRight, oUp, oFwd, oFr, *q, &S);
                 float rot[9]; vrm::basisToGamebryoRot(S.fwd, S.up, S.right, rot);
                 memcpy(cam + 0x60, rot, sizeof(rot));
@@ -1379,7 +1490,8 @@ static void WAR_THISCALL HookSetCamera(void* self, void* edx, const Vec3f* pos, 
                 g_cam.modified = true;
                 pp = &S.pos; pf = &S.fwd; pu = &S.up; pr = &S.right; pfr = S.fr;
                 g_outRing.add(S.right, S.up, S.fwd);
-                act = S.vr ? (g_vrEye ? "TAKEOVER+VR(R)" : "TAKEOVER+VR(L)") : "TAKEOVER";
+                act = S.vr ? (g_vrEye ? "TAKEOVER+VR(R)" : "TAKEOVER+VR(L)") : (flatFar ? "TAKEOVER-FLAT-FAR" : "TAKEOVER");
+                if (flatFar && !g_flatFarLogged) { g_flatFarLogged = true; Log("draw_distance (flat): main camera far plane %.0f -> %.0f\n", oFr[5], S.fr[5]); }
                 ++g_camTakeovers; ++g_setCameraRotated;
                 handled = true;
             } else act = "takeover-refused";
@@ -1612,7 +1724,10 @@ static void RunProbes(IDirect3DDevice9* dev)
     }
 
     // Can this (plain D3D9) device create a shared render target? Needed for zero-copy hand-off to D3D11/OpenVR.
-    {
+    // Not under DXVK: the VK path needs no shared handle, and DXVK asks the Vulkan driver for Win32 external memory
+    // here; without it (Mesa under Wine) the texture comes back broken and the game crashed soon after.
+    if (g_isDxvk) Log("probe shared RT: skipped (DXVK, the VK path hands off without shared handles)\n");
+    else {
         HANDLE shared = nullptr;
         IDirect3DTexture9* tex = nullptr;
         HRESULT hr = dev->CreateTexture(1024, 1024, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &tex, &shared);
@@ -1719,6 +1834,54 @@ static bool VRCaptureEye(IDirect3DDevice9* dev, int eye, const RECT* srcRect)
     return true;
 }
 
+// ---- vr_snapshot=N: save the picture the headset gets, once, after N submitted pairs ------------------------------
+// Reads the side-by-side VR target (or the back buffer) back through plain D3D9, so it works with every hand-off path
+// (CPU, GPU/dgVoodoo, VK/DXVK). Written at half size as a 24-bit BMP to %TEMP%\WARVR_vr_snapshot_<pair>.bmp.
+static unsigned g_snapshotAt = 0;
+static unsigned g_snapshotCount = 1;               // vr_snapshot=N,K: K snapshots, N pairs apart
+static bool g_snapshotHudCycle = false;            // vr_snapshot_hud_cycle=on: next HUD style after each snapshot (rig testing)
+static void ApplyHudStyle(int st);
+static const char* HudStyleName(int s);
+static void VRSnapshot(IDirect3DDevice9* dev, unsigned pair)
+{
+    IDirect3DSurface9* src = nullptr;
+    if (g_redirect && g_vrRT) { src = g_vrRT; src->AddRef(); }
+    else if (FAILED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &src)) || !src) { Log("VR snapshot: no source surface\n"); return; }
+    D3DSURFACE_DESC d{}; src->GetDesc(&d);
+    IDirect3DSurface9* sys = nullptr;
+    HRESULT hr = dev->CreateOffscreenPlainSurface(d.Width, d.Height, d.Format, D3DPOOL_SYSTEMMEM, &sys, nullptr);
+    if (SUCCEEDED(hr)) hr = dev->GetRenderTargetData(src, sys);
+    src->Release();
+    D3DLOCKED_RECT lr{};
+    if (SUCCEEDED(hr)) hr = sys->LockRect(&lr, nullptr, D3DLOCK_READONLY);
+    if (FAILED(hr) || (d.Format != D3DFMT_A8R8G8B8 && d.Format != D3DFMT_X8R8G8B8)) {
+        Log("VR snapshot: readback failed hr=0x%08lX (format %d)\n", (unsigned long)hr, (int)d.Format);
+        if (sys) { if (SUCCEEDED(hr)) sys->UnlockRect(); sys->Release(); }
+        return;
+    }
+    const UINT w = d.Width / 2, h = d.Height / 2, row = (w * 3 + 3) & ~3u;
+    std::vector<uint8_t> img(size_t(row) * h);
+    for (UINT y = 0; y < h; ++y) {                                    // BMP rows go bottom-up; 2x2 box filter
+        const uint8_t* a = static_cast<const uint8_t*>(lr.pBits) + size_t(2 * y) * lr.Pitch;
+        const uint8_t* b = a + lr.Pitch;
+        uint8_t* o = img.data() + size_t(h - 1 - y) * row;
+        for (UINT x = 0; x < w; ++x)
+            for (int c = 0; c < 3; ++c)
+                o[x * 3 + c] = (uint8_t)((a[x * 8 + c] + a[x * 8 + 4 + c] + b[x * 8 + c] + b[x * 8 + 4 + c] + 2) / 4);
+    }
+    sys->UnlockRect(); sys->Release();
+    char path[MAX_PATH]; char tmp[MAX_PATH] = "."; GetTempPathA(MAX_PATH, tmp);
+    snprintf(path, sizeof(path), "%sWARVR_vr_snapshot_%u.bmp", tmp, pair);
+    FILE* f = fopen(path, "wb");
+    if (!f) { Log("VR snapshot: cannot write %s\n", path); return; }
+    const uint32_t dataSize = (uint32_t)img.size(), fileSize = 54 + dataSize;
+    uint8_t hd[54] = { 'B', 'M' };
+    auto put32 = [&](int at, uint32_t v) { hd[at] = (uint8_t)v; hd[at + 1] = (uint8_t)(v >> 8); hd[at + 2] = (uint8_t)(v >> 16); hd[at + 3] = (uint8_t)(v >> 24); };
+    put32(2, fileSize); put32(10, 54); put32(14, 40); put32(18, w); put32(22, h); hd[26] = 1; hd[28] = 24; put32(34, dataSize);
+    fwrite(hd, 1, 54, f); fwrite(img.data(), 1, img.size(), f); fclose(f);
+    Log("VR snapshot: %ux%u target saved at half size (%ux%u) to %s (left half = left eye)\n", d.Width, d.Height, w, h, path);
+}
+
 // ---- VR-sized render target ("vr_resolution=steamvr") ---------------------------------------------------------
 // The game draws into what it believes is its back buffer. We give it a render target + depth buffer of the size
 // SteamVR wants instead (both eyes side by side), and scale the viewports/clears/scissors it sets in ITS coordinates.
@@ -1733,7 +1896,16 @@ static bool VRRedirectBegin(IDirect3DDevice9* dev, UINT w, UINT h)
     IDirect3DSurface9* ds = nullptr;
     g_autoDS = nullptr;
     if (SUCCEEDED(dev->GetDepthStencilSurface(&ds)) && ds) { D3DSURFACE_DESC dd{}; ds->GetDesc(&dd); dsFmt = dd.Format; g_autoDS = ds; ds->Release(); }
-    HRESULT hr = dev->CreateRenderTarget(w, h, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &g_vrRT, nullptr);
+    HRESULT hr = E_FAIL;
+    if (g_vk.Attached()) {
+        // DXVK: make the target level 0 of a render-target TEXTURE. Plain render-target surfaces get no SAMPLED usage in
+        // DXVK, and SteamVR needs it, so this lets the Vulkan hand-off submit our target directly with no copy.
+        IDirect3DTexture9* t = nullptr;
+        hr = dev->CreateTexture(w, h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &t, nullptr);
+        if (SUCCEEDED(hr) && t) { hr = t->GetSurfaceLevel(0, &g_vrRT); t->Release(); }      // the surface keeps its texture alive
+        if (FAILED(hr)) g_vrRT = nullptr;
+    }
+    if (!g_vrRT) hr = dev->CreateRenderTarget(w, h, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &g_vrRT, nullptr);
     if (FAILED(hr)) { if (!g_redirectQuiet) Log("VR redirect: CreateRenderTarget(%ux%u) failed hr=0x%08lX (%s)\n", w, h, (unsigned long)hr, hr == D3DERR_OUTOFVIDEOMEMORY ? "D3DERR_OUTOFVIDEOMEMORY" : "?"); g_vrRT = nullptr; return false; }
     hr = dev->CreateDepthStencilSurface(w, h, dsFmt, D3DMULTISAMPLE_NONE, 0, FALSE, &g_vrDS, nullptr);
     if (FAILED(hr)) { if (!g_redirectQuiet) Log("VR redirect: CreateDepthStencilSurface(%ux%u fmt %d) failed hr=0x%08lX\n", w, h, (int)dsFmt, (unsigned long)hr); g_vrRT->Release(); g_vrRT = nullptr; g_vrDS = nullptr; return false; }
@@ -1795,6 +1967,7 @@ static void VRRedirectEnd(IDirect3DDevice9* dev)
 {
     g_reflSurf = nullptr; g_reflTex = nullptr; g_reflStageMask = 0; g_reflHandled = false; g_lastOffscreenRT = nullptr; g_reflTexSearches = 0;
     VRHudRelease();                           // default-pool HUD texture: must go before a Reset or when VR stops
+    LaserRelease();                           // the beam's occlusion queries
     if (!g_redirect) return;
     g_redirect = false;
     if (dev) {
@@ -1887,6 +2060,232 @@ static void VRDrawCursor(IDirect3DDevice9* dev)
     g_origSetViewport(dev, &g_devVP);
 }
 
+// ---- laser pointer ---------------------------------------------------------------------------------------------------
+// The game decides what is under the mouse with a ray from its own (unsteered) camera through the cursor. In VR you see
+// the world from elsewhere (head turned, two eyes) and the cursor sits on the HUD panel, so it does not line up with
+// what it points at. This draws that ray: invisible probes along it, tested against this frame's depth with occlusion
+// queries (read one frame later), give the first surface it hits; a beam goes from the "hand" (or your eyes) to there,
+// with a dot at the hit. Drawn before the HUD panel, so UI in front of it covers it, like it covers the world.
+static const int kLaserProbes = 64;               // first half spread over the whole ray, second half close around the last hit
+static IDirect3DQuery9* g_laserQ[2][kLaserProbes] = {};
+static int g_laserProbeState[2][kLaserProbes];      // -1 not issued (off screen), 1 issued
+static float g_laserProbeDist[2][kLaserProbes];
+static bool g_laserIssued[2] = { false, false };
+static int g_laserSet = 0;
+static bool g_laserQueriesOk = false, g_laserQueriesTried = false;
+static float g_laserHitD = -1.f;                    // world units along the ray, -1 = nothing hit
+static unsigned g_laserFrames = 0, g_laserHits = 0;
+static int g_laserDiag[4] = { 0, 0, 0, 0 };          // last read: issued, visible, hidden, not ready (log only)
+
+static void LaserRelease()
+{
+    for (int s = 0; s < 2; ++s) { for (int i = 0; i < kLaserProbes; ++i) if (g_laserQ[s][i]) { g_laserQ[s][i]->Release(); g_laserQ[s][i] = nullptr; } g_laserIssued[s] = false; }
+    g_laserQueriesOk = g_laserQueriesTried = false; g_laserHitD = -1.f;
+}
+
+struct LaserVertex { float x, y, z, rhw; DWORD color; };
+
+// Clip-space point -> pretransformed vertex in the viewport vp. False if behind the eye.
+static bool LaserScreen(const float c[4], const D3DVIEWPORT9& vp, float* sx, float* sy, float* sz, float* rhw)
+{
+    if (c[3] <= 1e-6f) return false;
+    const float iw = 1.f / c[3];
+    *sx = (float)vp.X + (c[0] * iw + 1.f) * 0.5f * (float)vp.Width;
+    *sy = (float)vp.Y + (1.f - c[1] * iw) * 0.5f * (float)vp.Height;
+    float z = c[2] * iw; if (z < 0.f) z = 0.f; if (z > 1.f) z = 1.f;
+    *sz = vp.MinZ + z * (vp.MaxZ - vp.MinZ); *rhw = iw;
+    return true;
+}
+
+static void VRDrawLaser(IDirect3DDevice9* dev)
+{
+    OwnRS ownRS;
+    if (g_laserDone) return;                                        // already drawn this frame, at the game's depth clear
+    if (!g_laserOn || !g_pickValid || !g_frameBestValid || !g_gameHwnd || !g_eyeParamsOk || !g_stereoSBS) return;
+    POINT p{}; RECT cr{};
+    if (!GetCursorPos(&p) || !ScreenToClient(g_gameHwnd, &p) || !GetClientRect(g_gameHwnd, &cr)) return;
+    const long cw = cr.right - cr.left, ch = cr.bottom - cr.top;
+    if (cw <= 0 || ch <= 0 || p.x < 0 || p.y < 0 || p.x >= cw || p.y >= ch) return;
+    float u, v; vrm::cursorUV(p.x, p.y, cw, ch, &u, &v);
+    if (g_hudBound) VRHudUnbind(dev);                                      // world target and its depth buffer
+    const int rtW = (int)(g_curRTw ? g_curRTw : g_bbW), rtH = (int)(g_curRTh ? g_curRTh : g_bbH);
+    if (rtW < 64 || rtH < 64) return;
+    if (!g_laserQueriesTried) {
+        g_laserQueriesTried = true;
+        g_laserQueriesOk = SUCCEEDED(dev->CreateQuery(D3DQUERYTYPE_OCCLUSION, nullptr));
+        for (int s = 0; s < 2 && g_laserQueriesOk; ++s) for (int i = 0; i < kLaserProbes; ++i)
+            if (FAILED(dev->CreateQuery(D3DQUERYTYPE_OCCLUSION, &g_laserQ[s][i])) || !g_laserQ[s][i]) { g_laserQueriesOk = false; break; }
+        Log("LASER: occlusion queries %s\n", g_laserQueriesOk ? "available, the beam ends where it hits the world" : "NOT available, the beam just goes 60 m out");
+    }
+
+    // The ray, in world units.
+    const vrm::V3 rc = vrm::pickRayCamera(u, v, g_pickFr);
+    float dir[3], O[3];
+    for (int c = 0; c < 3; ++c) { dir[c] = g_pickR[c] * rc.x + g_pickU[c] * rc.y + g_pickF[c] * rc.z; O[c] = g_pickPos[c]; }
+    // The two eyes' world view-projection matrices, exactly as this frame's world was drawn.
+    D3DMATRIX vp[2];
+    vrm::mul4(g_frameBestView.m, g_frameBestProj.m, vp[0].m);
+    float vR[4][4], pR[4][4], worst = 0.f;
+    const bool haveR = vrm::rightEyeMatrices(g_frameBestView.m, g_frameBestProj.m, g_eyeFrustum[0], g_eyeFrustum[1],
+        vrm::eyeOffsetCamera(g_eyeToHead[0]), vrm::eyeOffsetCamera(g_eyeToHead[1]), g_unitsPerMeter, vR, pR, &worst);
+    if (haveR) vrm::mul4(vR, pR, vp[1].m);
+    const float upm = g_unitsPerMeter;
+    float farU = g_lastFarUsed > 0.f ? g_lastFarUsed : 400.f * upm;
+    if (farU > 400.f * upm) farU = 400.f * upm;
+
+    // Read last frame's probes (non-blocking); keep the old hit while they are not ready.
+    const int prev = g_laserSet ^ 1;
+    if (g_laserQueriesOk && g_laserIssued[prev]) {
+        int st[kLaserProbes]; float dd[kLaserProbes]; int order[kLaserProbes]; bool ready = true;
+        for (int i = 0; i < kLaserProbes && ready; ++i) {
+            order[i] = i; dd[i] = g_laserProbeDist[prev][i];
+            if (g_laserProbeState[prev][i] < 0) { st[i] = -1; continue; }
+            DWORD n = 0; const HRESULT hr = g_laserQ[prev][i]->GetData(&n, sizeof(n), 0);
+            if (hr == S_OK) st[i] = n > 0 ? 1 : 0; else if (hr == S_FALSE) ready = false; else st[i] = -1;
+        }
+        g_laserDiag[3] = ready ? 0 : g_laserDiag[3] + 1;
+        if (ready) {
+            g_laserDiag[0] = g_laserDiag[1] = g_laserDiag[2] = 0;
+            for (int i = 0; i < kLaserProbes; ++i) if (st[i] >= 0) { ++g_laserDiag[0]; ++g_laserDiag[st[i] ? 1 : 2]; }
+            std::sort(order, order + kLaserProbes, [&](int a, int b) { return dd[a] < dd[b]; });
+            int ss[kLaserProbes]; float sd[kLaserProbes];
+            for (int i = 0; i < kLaserProbes; ++i) { ss[i] = st[order[i]]; sd[i] = dd[order[i]]; }
+            memcpy(st, ss, sizeof(st)); memcpy(dd, sd, sizeof(dd)); g_laserHitD = vrm::laserHitDistance(st, dd, kLaserProbes); g_laserIssued[prev] = false; if (g_laserHitD > 0.f) ++g_laserHits; }
+    }
+
+    // Save state.
+    static const D3DRENDERSTATETYPE kRS[] = { D3DRS_ZENABLE, D3DRS_ZWRITEENABLE, D3DRS_ZFUNC, D3DRS_ALPHABLENDENABLE, D3DRS_CULLMODE, D3DRS_LIGHTING,
+        D3DRS_ALPHATESTENABLE, D3DRS_STENCILENABLE, D3DRS_SCISSORTESTENABLE, D3DRS_FOGENABLE, D3DRS_COLORWRITEENABLE,
+        D3DRS_SEPARATEALPHABLENDENABLE, D3DRS_FILLMODE, D3DRS_SPECULARENABLE, D3DRS_CLIPPING };
+    constexpr int kN = (int)(sizeof(kRS) / sizeof(kRS[0]));
+    static const struct { DWORD stage; D3DTEXTURESTAGESTATETYPE type; DWORD val; } kTSS[] = {
+        { 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1 }, { 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE },
+        { 0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1 }, { 0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE }, { 1, D3DTSS_COLOROP, D3DTOP_DISABLE } };
+    constexpr int kT = (int)(sizeof(kTSS) / sizeof(kTSS[0]));
+    DWORD savedRS[kN], savedTSS[kT];
+    for (int i = 0; i < kN; ++i) { savedRS[i] = 0; dev->GetRenderState(kRS[i], &savedRS[i]); }
+    for (int i = 0; i < kT; ++i) { savedTSS[i] = 0; dev->GetTextureStageState(kTSS[i].stage, kTSS[i].type, &savedTSS[i]); }
+    IDirect3DBaseTexture9* tex0 = nullptr; dev->GetTexture(0, &tex0);
+    IDirect3DVertexDeclaration9* decl = nullptr; dev->GetVertexDeclaration(&decl);
+    IDirect3DVertexBuffer9* vb0 = nullptr; UINT vb0Off = 0, vb0Stride = 0; dev->GetStreamSource(0, &vb0, &vb0Off, &vb0Stride);
+    D3DVIEWPORT9 savedVP{}; dev->GetViewport(&savedVP);
+    IDirect3DVertexShader9* vs = nullptr; dev->GetVertexShader(&vs);
+    IDirect3DPixelShader9* ps = nullptr; dev->GetPixelShader(&ps);
+    RECT savedScissorRc{}; dev->GetScissorRect(&savedScissorRc);
+    IDirect3DSurface9* ds = nullptr; const bool haveDS = SUCCEEDED(dev->GetDepthStencilSurface(&ds)) && ds;
+    if (g_log && g_laserFrames == 0) {
+        D3DSURFACE_DESC dd{}, rd{}; IDirect3DSurface9* rt = nullptr;
+        if (ds) ds->GetDesc(&dd);
+        if (SUCCEEDED(dev->GetRenderTarget(0, &rt)) && rt) { rt->GetDesc(&rd); rt->Release(); }
+        Log("LASER: target %ux%u (ms %d), depth %s %ux%u fmt %d (ms %d)\n", rd.Width, rd.Height, (int)rd.MultiSampleType, haveDS ? "bound" : "NONE", dd.Width, dd.Height, (int)dd.Format, (int)dd.MultiSampleType);
+    }
+    if (ds) ds->Release();
+
+    dev->SetVertexShader(nullptr); dev->SetPixelShader(nullptr); dev->SetFVF(D3DFVF_XYZRHW | D3DFVF_DIFFUSE); dev->SetTexture(0, nullptr);
+    for (int i = 0; i < kT; ++i) dev->SetTextureStageState(kTSS[i].stage, kTSS[i].type, kTSS[i].val);
+    dev->SetRenderState(D3DRS_ZWRITEENABLE, FALSE); dev->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
+    dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE); dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+    dev->SetRenderState(D3DRS_LIGHTING, FALSE); dev->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+    dev->SetRenderState(D3DRS_STENCILENABLE, FALSE); dev->SetRenderState(D3DRS_FOGENABLE, FALSE);
+    dev->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, FALSE); dev->SetRenderState(D3DRS_FILLMODE, D3DFILL_SOLID);
+    dev->SetRenderState(D3DRS_SPECULARENABLE, FALSE); dev->SetRenderState(D3DRS_SCISSORTESTENABLE, TRUE);
+
+    // Probes: left eye, invisible (no colour writes), depth-tested.
+    if (g_laserQueriesOk && haveDS) {
+        const int cur = g_laserSet;
+        int x, y, w, h; EyeRegion(0, rtW, rtH, &x, &y, &w, &h);
+        SetVP(dev, x, y, w, h);
+        D3DVIEWPORT9 evp{}; dev->GetViewport(&evp);
+        const RECT rc0 = { x, y, x + w, y + h }; g_origSetScissor(dev, &rc0);
+        dev->SetRenderState(D3DRS_ZENABLE, TRUE); dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0);
+        const int half = kLaserProbes / 2;
+        const float dmin = 0.4f * upm;
+        float fineLo = 0.f, fineHi = 0.f;
+        if (g_laserHitD > 0.f) { fineLo = g_laserHitD * 0.8f; fineHi = g_laserHitD * 1.25f; if (fineLo < dmin) fineLo = dmin; if (fineHi > farU) fineHi = farU; }
+        for (int i = 0; i < kLaserProbes; ++i) {
+            float d;
+            if (i < half) d = vrm::laserProbeDistance(i, half, dmin, farU);
+            else if (fineHi > fineLo) d = fineLo + (fineHi - fineLo) * (float)(i - half) / (float)(half - 1);
+            else d = vrm::laserProbeDistance(i - half, half, dmin, farU) * std::pow(farU / dmin, 0.5f / (float)(half - 1));   // between the coarse ones
+            if (d > farU) d = farU;
+            g_laserProbeDist[cur][i] = d;
+            const float P[3] = { O[0] + dir[0] * d, O[1] + dir[1] * d, O[2] + dir[2] * d };
+            float c[4]; vrm::xformPoint(P, vp[0].m, c);
+            float sx, sy, sz, rhw;
+            g_laserProbeState[cur][i] = -1;
+            if (!LaserScreen(c, evp, &sx, &sy, &sz, &rhw)) continue;
+            if (sx < (float)x + 1.f || sy < (float)y + 1.f || sx > (float)(x + w) - 2.f || sy > (float)(y + h) - 2.f) continue;
+            const LaserVertex q[4] = { { sx - 1.f, sy - 1.f, sz, rhw, 0 }, { sx + 1.f, sy - 1.f, sz, rhw, 0 },
+                                       { sx - 1.f, sy + 1.f, sz, rhw, 0 }, { sx + 1.f, sy + 1.f, sz, rhw, 0 } };
+            g_laserQ[cur][i]->Issue(D3DISSUE_BEGIN);
+            g_origDrawPrimitiveUP(dev, D3DPT_TRIANGLESTRIP, 2, q, sizeof(LaserVertex));
+            g_laserQ[cur][i]->Issue(D3DISSUE_END);
+            g_laserProbeState[cur][i] = 1;
+        }
+        g_laserIssued[cur] = true;
+        g_laserSet ^= 1;
+    }
+
+    // Beam and dot, both eyes.
+    const float hitD = g_laserHitD > 0.f ? g_laserHitD : (60.f * upm < farU ? 60.f * upm : farU);
+    const float E[3] = { O[0] + dir[0] * hitD, O[1] + dir[1] * hitD, O[2] + dir[2] * hitD };
+    float H[3];
+    if (g_laserOrigin == 1) for (int c = 0; c < 3; ++c) H[c] = O[c] + dir[c] * 0.3f * upm;
+    else for (int c = 0; c < 3; ++c) H[c] = O[c] + upm * (0.18f * g_pickR[c] - 0.30f * g_pickU[c] + 0.25f * g_pickF[c]);
+    dev->SetRenderState(D3DRS_COLORWRITEENABLE, D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN | D3DCOLORWRITEENABLE_BLUE);
+    for (int eye = 0; eye < (haveR ? 2 : 1); ++eye) {
+        int x, y, w, h; EyeRegion(eye, rtW, rtH, &x, &y, &w, &h);
+        SetVP(dev, x, y, w, h);
+        D3DVIEWPORT9 evp{}; dev->GetViewport(&evp);
+        const RECT rc1 = { x, y, x + w, y + h }; g_origSetScissor(dev, &rc1);
+        float a[4], b[4]; vrm::xformPoint(H, vp[eye].m, a); vrm::xformPoint(E, vp[eye].m, b);
+        if (vrm::clipSegmentW(a, b, 1e-3f)) {
+            float ax, ay, az, aw, bx, by, bz, bw;
+            if (LaserScreen(a, evp, &ax, &ay, &az, &aw) && LaserScreen(b, evp, &bx, &by, &bz, &bw)) {
+                float nx = -(by - ay), ny = bx - ax; const float len = std::sqrt(nx * nx + ny * ny);
+                if (len > 0.5f) {
+                    dev->SetRenderState(D3DRS_ZENABLE, haveDS ? TRUE : FALSE);
+                    for (int pass = 0; pass < 2; ++pass) {                       // dark edge, then the bright core
+                        const float hw = (pass ? 0.5f : 1.0f) * g_laserPx; const DWORD col = pass ? 0xFFFF4040u : 0xFF400000u;
+                        const float ox = nx / len * hw, oy = ny / len * hw;
+                        const LaserVertex q[4] = { { ax - ox, ay - oy, az, aw, col }, { ax + ox, ay + oy, az, aw, col },
+                                                   { bx - ox, by - oy, bz, bw, col }, { bx + ox, by + oy, bz, bw, col } };
+                        g_origDrawPrimitiveUP(dev, D3DPT_TRIANGLESTRIP, 2, q, sizeof(LaserVertex));
+                    }
+                }
+            }
+        }
+        if (g_laserHitD > 0.f) {                                                  // the dot sits on the surface: always drawn
+            float c[4]; vrm::xformPoint(E, vp[eye].m, c);
+            float sx, sy, sz, rhw;
+            if (LaserScreen(c, evp, &sx, &sy, &sz, &rhw)) {
+                dev->SetRenderState(D3DRS_ZENABLE, FALSE);
+                for (int pass = 0; pass < 2; ++pass) {
+                    const float r = pass ? 2.2f * g_laserPx : 3.2f * g_laserPx; const DWORD col = pass ? 0xFFFF5050u : 0xFF200000u;
+                    LaserVertex fan[18]; fan[0] = { sx, sy, sz, rhw, col };
+                    for (int k = 0; k <= 16; ++k) { const float t = 6.2831853f * (float)k / 16.f; fan[k + 1] = { sx + r * std::cos(t), sy + r * std::sin(t), sz, rhw, col }; }
+                    g_origDrawPrimitiveUP(dev, D3DPT_TRIANGLEFAN, 16, fan, sizeof(LaserVertex));
+                }
+            }
+        }
+    }
+    ++g_laserFrames;
+    g_laserDone = true;
+    if (g_log && (g_laserFrames == 120 || g_laserFrames % (g_snapshotAt ? 50u : 1800u) == 0))   // more often in rig test runs
+        Log("LASER: %u frames, %u probe results with a hit; current hit %.1f m (%s), cursor at %.3f %.3f; probes issued %d visible %d hidden %d (not ready %d)\n", g_laserFrames, g_laserHits,
+            g_laserHitD > 0.f ? g_laserHitD / upm : -1.f, g_laserHitD > 0.f ? "surface" : "nothing hit, beam 60 m", u, v, g_laserDiag[0], g_laserDiag[1], g_laserDiag[2], g_laserDiag[3]);
+
+    g_origSetScissor(dev, &savedScissorRc);
+    for (int i = 0; i < kT; ++i) dev->SetTextureStageState(kTSS[i].stage, kTSS[i].type, savedTSS[i]);
+    for (int i = 0; i < kN; ++i) dev->SetRenderState(kRS[i], savedRS[i]);
+    dev->SetVertexDeclaration(decl); if (decl) decl->Release();
+    dev->SetStreamSource(0, vb0, vb0Off, vb0Stride); if (vb0) vb0->Release();
+    dev->SetVertexShader(vs); if (vs) vs->Release();
+    dev->SetPixelShader(ps); if (ps) ps->Release();
+    dev->SetTexture(0, tex0); if (tex0) tex0->Release();
+    g_origSetViewport(dev, &savedVP);
+}
+
 // End of frame, hud_anchor=world: draw the finished HUD texture as a flat panel per eye, fixed in the game's frame.
 struct HudVertex { float x, y, z, u, v; };
 static void VRCompositeHud(IDirect3DDevice9* dev)
@@ -1937,18 +2336,36 @@ static void VRCompositeHud(IDirect3DDevice9* dev)
     const float uiAspect = g_logH ? (float)g_logW / (float)g_logH : (g_bbH ? (float)g_bbW / (float)g_bbH : 2.37f);
     const vrm::Mat3 q = (g_headOn.load() && g_frameQValid) ? g_frameQ : vrm::identity();
     const vrm::V3 hp = (g_positional && g_headOn.load() && g_frameQValid) ? g_headDeltaCam : vrm::V3{ 0, 0, 0 };
+    {   // lazy follow, once per frame
+        static LARGE_INTEGER last{}; LARGE_INTEGER now; QueryPerformanceCounter(&now);
+        LARGE_INTEGER f; QueryPerformanceFrequency(&f);
+        const float dt = last.QuadPart ? (float)((double)(now.QuadPart - last.QuadPart) / (double)f.QuadPart) : 0.f;
+        last = now;
+        if (g_hudFollow && g_headOn.load() && g_frameQValid)
+            g_hudYaw = vrm::lazyFollowYaw(g_hudYaw, vrm::headYawOf(q), dt, g_hudFollowDeg, 0.35f, &g_hudFollowing);
+        else { g_hudYaw = 0.f; g_hudFollowing = false; }
+    }
+    // The panel as a strip of quads: one column for a flat untilted panel, 32 when it is curved.
+    const int cols = g_hudCurve ? 32 : 1;
+    HudVertex mesh[2 * 33];
     for (int eye = 0; eye < 2; ++eye) {
-        float c[4][3];
-        if (!vrm::hudQuadEyeSpace(vrm::eyeOffsetCamera(g_eyeToHead[eye]), q, hp, g_hudDistance, g_hudWidth, uiAspect, g_hudVert, 0.05f, c)) continue;
+        const vrm::V3 eo = vrm::eyeOffsetCamera(g_eyeToHead[eye]);
+        bool any = false;
+        for (int i = 0; i <= cols; ++i) for (int r = 0; r < 2; ++r) {
+            const float u = (float)i / (float)cols, vv = (float)r;
+            float e[3];
+            vrm::hudPointToEye(vrm::hudPanelPoint(u, vv, g_hudDistance, g_hudWidth, uiAspect, g_hudVert, g_hudCurve, g_hudTilt, g_hudYaw), eo, q, hp, e);
+            if (e[2] > 0.05f) any = true;
+            mesh[i * 2 + r] = { e[0], e[1], e[2], u, vv };
+        }
+        if (!any) continue;
         int x, y, w, h; EyeRegion(eye, rtW, rtH, &x, &y, &w, &h);
         SetVP(dev, x, y, w, h);
         float pm[4][4];
         vrm::perspFromFrustum(g_eyeFrustum[eye][0], g_eyeFrustum[eye][1], g_eyeFrustum[eye][2], g_eyeFrustum[eye][3], 0.05f, 100.f, pm);
         D3DMATRIX proj; memcpy(&proj, pm, sizeof(proj));
         g_origSetTransform(dev, D3DTS_PROJECTION, &proj);
-        const HudVertex v[4] = { { c[0][0], c[0][1], c[0][2], 0.f, 0.f }, { c[1][0], c[1][1], c[1][2], 1.f, 0.f },
-                                 { c[2][0], c[2][1], c[2][2], 0.f, 1.f }, { c[3][0], c[3][1], c[3][2], 1.f, 1.f } };
-        g_origDrawPrimitiveUP(dev, D3DPT_TRIANGLESTRIP, 2, v, sizeof(HudVertex));
+        g_origDrawPrimitiveUP(dev, D3DPT_TRIANGLESTRIP, 2 * cols, mesh, sizeof(HudVertex));
     }
 
     g_origSetScissor(dev, &savedScissorRc);
@@ -2015,6 +2432,51 @@ static void VRPrepareMainTarget(IDirect3DDevice9* dev)
     g_origSetViewport(dev, &g_devVP);
 }
 
+// DXVK hand-off: submit this frame's side-by-side picture to SteamVR as one Vulkan image (left/right half via bounds).
+// Same sequence as Proton's vrclient for D3D11-on-DXVK games. Returns false (and the caller falls back) if it cannot.
+static bool VRSubmitVulkan(IDirect3DDevice9* dev, EVRCompositorError* e0, EVRCompositorError* e1)
+{
+    VRPrepareMainTarget(dev);                 // alpha = 1 over the picture, and the main target bound
+    IDirect3DSurface9* src = nullptr; bool own = false;
+    if (g_redirect && g_vrRT) src = g_vrRT;
+    else { if (FAILED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &src)) || !src) { g_vkWhy = "GetBackBuffer failed"; return false; } own = true; }
+    vkp::Frame f; const char* why = "";
+    bool ok = g_vk.Describe(src, &f, &why);
+    if (!ok) {                                // e.g. the real back buffer, or a plain render target: copy into our own texture
+        IDirect3DSurface9* c = g_vk.CopyIfNeeded(dev, src, g_origStretchRect, Log);
+        ok = c && g_vk.Describe(c, &f, &why);
+        if (!c) why = "copy into an own texture failed";
+    }
+    if (own) src->Release();
+    if (!ok) { g_vkWhy = why; return false; }
+    if (!g_vk.explicitTimingSet) {
+        g_vr.SetExplicitTiming(EVRCompositorTimingMode_VRCompositorTimingMode_Explicit_ApplicationPerformsPostPresentHandoff);
+        g_vk.explicitTimingSet = true;
+        Log("VK path: explicit timing mode set (WaitGetPoses no longer uses DXVK's queue; PostPresentHandoff runs under the queue lock)\n");
+    }
+    const vkp::VkImageSubresourceRange range = { vkp::ASPECT_COLOR, 0, f.mips, 0, f.layers };
+    g_vk.dev->TransitionTextureLayout(f.tex, &range, f.layout, vkp::LAYOUT_TRANSFER_SRC_OPTIMAL);
+    g_vk.dev->FlushRenderingCommands();
+    g_vk.dev->LockSubmissionQueue();          // no D3D9 calls from here until ReleaseSubmissionQueue
+    VRVulkanTextureData_t vd{};
+    vd.m_nImage = f.image;
+    vd.m_pDevice = reinterpret_cast<struct VkDevice_T*>(g_vk.device);
+    vd.m_pPhysicalDevice = reinterpret_cast<struct VkPhysicalDevice_T*>(g_vk.phys);
+    vd.m_pInstance = reinterpret_cast<struct VkInstance_T*>(g_vk.inst);
+    vd.m_pQueue = reinterpret_cast<struct VkQueue_T*>(g_vk.queue);
+    vd.m_nQueueFamilyIndex = g_vk.queueFamily;
+    vd.m_nWidth = f.width; vd.m_nHeight = f.height; vd.m_nFormat = f.format; vd.m_nSampleCount = f.samples;
+    *e0 = g_vr.SubmitVulkan(0, &vd, 0.f, 0.5f);
+    *e1 = g_vr.SubmitVulkan(1, &vd, 0.5f, 1.f);
+    g_vk.dev->ReleaseSubmissionQueue();
+    g_vk.dev->TransitionTextureLayout(f.tex, &range, vkp::LAYOUT_TRANSFER_SRC_OPTIMAL, f.layout);
+    if (!g_vkActive || g_vkFrames == 0)
+        Log("VK path: ACTIVE - submitting VkImage 0x%llx %ux%u (VkFormat %u, layout %d, usage 0x%x) straight to SteamVR, both eyes from one image\n",
+            (unsigned long long)f.image, f.width, f.height, f.format, (int)f.layout, f.usage);
+    ++g_vkFrames; g_vkActive = true;
+    return true;
+}
+
 static void VRStop(IDirect3DDevice9* dev, const char* why)
 {
     Log("VR stopping (%s)\n", why);
@@ -2024,6 +2486,7 @@ static void VRStop(IDirect3DDevice9* dev, const char* why)
     g_vrHaveEye[0] = g_vrHaveEye[1] = false;
     VRReleaseCapture();
     gpu::ReleaseEyes();
+    g_vk.ReleaseCopy(); g_vk.explicitTimingSet = false; g_vkActive = false;
     VRRedirectEnd(dev);
     g_vrDisplay.Shutdown();
     g_vr.Shutdown();
@@ -2052,7 +2515,8 @@ static bool VRStart(IDirect3DDevice9* dev)
     {
         // Is the GPU hand-off possible? Only then is a huge render target worth it: the CPU path squeezes every eye down to
         // eye_size (default 1600 high) before reading it back, so the extra pixels would be thrown away.
-        const bool gpuOk = g_gpuPathWanted && gpu::HaveGame();
+        const bool gpuOk = (g_gpuPathWanted && gpu::HaveGame()) || (g_vkPathWanted && g_vk.Attached());
+        if (g_vkPathWanted && g_vk.Attached()) Log("VK path: DXVK is the D3D9 layer; eye pictures go to SteamVR as Vulkan images (no copy, no CPU readback)\n");
         const bool wantHiRes = g_resMode == 1 || (g_resMode == 2 && gpuOk);
         Log("VR: resolution mode=%s, GPU hand-off available=%d (%d D3D11 candidate(s)) -> %s\n", g_resMode == 1 ? "steamvr" : (g_resMode == 0 ? "desktop" : "auto"),
             gpuOk ? 1 : 0, gpu::CandidateCount(), wantHiRes ? "rendering at SteamVR's size" : "rendering at the game's own resolution");
@@ -2102,8 +2566,9 @@ static bool VRStart(IDirect3DDevice9* dev)
             Log("GPU path: hooks installed in the D3D11 context vtable %p (%s); waiting to learn the game's D3D11 context\n", (void*)vt, Describe(vt).c_str());
     }
     g_vrFrameNo = 0; g_gpuFrames = g_gpuFails = g_gpuFailStreak = 0; g_gpuActive = false;
+    g_vkActive = false; g_vkSubmitErrStreak = 0;
     if (!VRCreateCapture(dev)) {
-        if (g_gpuPathWanted && gpu::HaveGame())         // not needed while the GPU hand-off works; created lazily if the CPU path is ever used
+        if ((g_gpuPathWanted && gpu::HaveGame()) || (g_vkPathWanted && g_vk.Attached()))   // not needed while the GPU hand-off works; created lazily if the CPU path is ever used
             Log("VR: could not create the CPU-path capture surfaces (low video memory); continuing, the GPU path does not need them\n");
         else { g_vrDisplay.Shutdown(); VRRedirectEnd(dev); g_wantRTW = g_wantRTH = 0; g_vr.Shutdown(); return false; }
     }
@@ -2135,12 +2600,20 @@ static void VRBeforePresent(IDirect3DDevice9* dev)
     if (!g_vrActive) return;
     if (g_wantRTW && !g_redirect) { UINT w = g_wantRTW, h = g_wantRTH; VRRedirectBeginFit(dev, &w, &h); }   // recreate after a device reset
     const double t0 = NowMs();
+    VRDrawLaser(dev);                         // in the world, before the HUD panel covers it
     VRDrawCursor(dev);
     VRCompositeHud(dev);                      // hud_anchor=world: the panel goes into the picture now, after everything else
     if (g_stereoSBS) {
         // Both eyes were drawn into the two halves of this frame's main render target.
         void* texL = nullptr; void* texR = nullptr;
-        if (g_gpuPathWanted && gpu::HaveGame()) {
+        bool vkDone = false;
+        EVRCompositorError e0 = EVRCompositorError_VRCompositorError_None, e1 = EVRCompositorError_VRCompositorError_None;
+        if (g_vkPathWanted && g_vk.Attached()) {
+            vkDone = VRSubmitVulkan(dev, &e0, &e1);
+            if (!vkDone) { ++g_vkFails; g_vkActive = false; if (g_vkFails <= 3) Log("VK path: not usable this frame (%s) -> fallback\n", g_vkWhy); }
+        }
+        if (vkDone) {
+        } else if (g_gpuPathWanted && gpu::HaveGame()) {
             // GPU path: copy each half on the GPU into textures on the game's own D3D11 device. No CPU involved.
             const int set = (int)(g_vrFrameNo & 1);
             VRPrepareMainTarget(dev);
@@ -2154,7 +2627,7 @@ static void VRBeforePresent(IDirect3DDevice9* dev)
                 if (g_gpuWhy != r.why || g_gpuFails <= 3) Log("GPU path: not usable this frame (%s; bound target %ux%u format %d, expected shape %ux%u) -> CPU fallback\n", r.why, r.srcW, r.srcH, (int)r.srcFmt, g_bbW, g_bbH);
                 g_gpuWhy = r.why;
             }
-        } else if (g_gpuPathWanted && g_vrFrameNo == 240) {
+        } else if (g_gpuPathWanted && g_vrFrameNo == 240 && !g_vk.Attached()) {
             {
                 Log("GPU path: no D3D11 device was ever handed to the game's translation layer (creation hook calls=%u captured=%u, vtable hook hits=%u, creation hooks installed=%d). Using the CPU path.\n",
                     gpu::g_s.createCalls, gpu::g_s.createCaptured, gpu::g_s.hits, gpu::g_s.createHooked ? 1 : 0);
@@ -2166,7 +2639,7 @@ static void VRBeforePresent(IDirect3DDevice9* dev)
                         "or dgVoodoo is not the D3D9 layer in use.\n");
             }
         }
-        if (!texL) {                                        // CPU path (always available as a fallback)
+        if (!texL && !vkDone) {                             // CPU path (always available as a fallback)
             IDirect3DSurface9* bb = nullptr; D3DSURFACE_DESC d{};
             if (g_redirect && g_vrRT) g_vrRT->GetDesc(&d);
             else {
@@ -2180,13 +2653,23 @@ static void VRBeforePresent(IDirect3DDevice9* dev)
             texL = g_vrDisplay.eyeTexture(0); texR = g_vrDisplay.eyeTexture(1);
         }
         g_vrCapMsSum += NowMs() - t0; ++g_vrFramesInPeriod;
-        EVRCompositorError e0 = g_vr.Submit(0, texL);
-        EVRCompositorError e1 = g_vr.Submit(1, texR);
+        if (!vkDone) { e0 = g_vr.Submit(0, texL); e1 = g_vr.Submit(1, texR); }
         if (e0 || e1) ++g_vrSubmitErr;
         if (g_vrPairs < 5 || e0 || e1) {
             static unsigned errLogs = 0;
-            if (g_vrPairs < 5 || errLogs++ < 20) Log("VR: submit pair %u (%s) -> left err=%d right err=%d\n", g_vrPairs, g_gpuActive ? "GPU" : "CPU", (int)e0, (int)e1);
+            if (g_vrPairs < 5 || errLogs++ < 20) Log("VR: submit pair %u (%s) -> left err=%d right err=%d\n", g_vrPairs, vkDone ? "VK" : (g_gpuActive ? "GPU" : "CPU"), (int)e0, (int)e1);
         }
+        if (g_snapshotAt && (g_vrPairs + 1) % g_snapshotAt == 0 && (g_vrPairs + 1) / g_snapshotAt <= g_snapshotCount) {
+            VRSnapshot(dev, g_vrPairs + 1);
+            if (g_snapshotHudCycle) { ApplyHudStyle(g_hudStyle >= 2 ? 0 : g_hudStyle + 1); Log("vr_snapshot: HUD style now %s\n", HudStyleName(g_hudStyle)); }
+        }
+        if (vkDone && (e0 || e1)) {
+            if (++g_vkSubmitErrStreak >= 5) {           // SteamVR refuses the Vulkan images (e.g. missing extensions): use the CPU path
+                g_vkPathWanted = false; g_vkActive = false; g_vk.ReleaseCopy();
+                Log("VK path: SteamVR rejected the Vulkan eye images 5 times in a row (err=%d/%d) -> switching to the CPU path for this session. "
+                    "Usual cause: SteamVR was not running when the game started, so DXVK could not enable the Vulkan extensions SteamVR needs.\n", (int)e0, (int)e1);
+            }
+        } else if (vkDone) g_vkSubmitErrStreak = 0;
         if (g_gpuActive && (e0 || e1)) {
             if (++g_gpuSubmitErrStreak >= 5) {          // SteamVR refuses the game's textures: go back to the CPU path for good
                 g_gpuPathWanted = false; g_gpuActive = false; gpu::ReleaseEyes();
@@ -2220,7 +2703,9 @@ static void VRAfterPresent()
     if (!g_vrActive) return;
     if (g_vrEye == 0) {
         const int64_t tw = g_log ? PerfTick() : 0;
-        g_vr.PostPresentHandoff();
+        if (g_vkActive && g_vk.Attached()) {      // SteamVR uses DXVK's queue here
+            g_vk.dev->LockSubmissionQueue(); g_vr.PostPresentHandoff(); g_vk.dev->ReleaseSubmissionQueue();
+        } else g_vr.PostPresentHandoff();
         OpenVRHead::Pose pose;
         EVRCompositorError e = g_vr.WaitPoses(&pose);
         if (g_log) g_pf[PF_WAIT] += PerfTick() - tw;
@@ -2288,10 +2773,12 @@ static HRESULT WINAPI HookPresent(IDirect3DDevice9* self, const RECT* a, const R
 {
     { static bool once = false; if (!once) { once = true; Log("THREAD: first Present on thread %lu\n", GetCurrentThreadId()); } }
     if (g_log) { static int64_t last = 0; const int64_t now = PerfTick(); if (g_vrActive && last) { g_pf[PF_FRAME] += now - last; ++g_pfFrames; } last = now; }
+    LazyFlush(self);                            // our own drawing below, and the next frame, start from the game's state
     RestoreCamera();                            // give the game its own camera back before it updates it again
     ++g_frame;
     g_reflHandled = false;                    // the reflection camera is re-steered every frame
     if (g_framePerspDraws > 500) ++g_worldFrames; else g_worldFrames = 0;
+    if (g_autoVr && g_worldFrames == 150) { g_autoVr = false; g_autoVrRequest = true; Log("AUTO VR: first in-world frames, switching VR on (auto_vr=on)\n"); }
     if (g_log && !g_autoWorldCaptured && g_worldFrames > 120 && !g_capturing) { g_autoWorldCaptured = true; g_captureRequest = true; Log("AUTO capture of the first in-world frame\n"); }
     if (g_captureCountdown > 0 && --g_captureCountdown == 0 && !g_capturing && g_log) { g_captureRequest = true; Log("AUTO capture after toggle\n"); }
     if (g_frameBestValid) { g_mainView = g_frameBestView; g_mainProj = g_frameBestProj; g_mainValid = true; }
@@ -2332,6 +2819,9 @@ static HRESULT WINAPI HookPresent(IDirect3DDevice9* self, const RECT* a, const R
                 g_pf[PF_STEREO] * k, g_pf[PF_ISSUE] * k, g_pf[PF_SCAN] * k, (g_pf[PF_STEREO] - g_pf[PF_ISSUE] - g_pf[PF_SCAN]) * k, g_pf[PF_BEFORE] * k);
             Log("   PERF state calls: %.0f per frame (SetTexture, SetRenderState, vertex/pixel constants), about %.2f ms per frame inside dgVoodoo | shaders analysed VS=%u (refused %u) PS=%u (refused %u) | patches skipped as unused: %.0f per frame\n",
                 (double)g_stateCallsTotal / g_pfFrames, g_pf[PF_STATE] * k, g_shaderAnalysed[0], g_shaderRefused[0], g_shaderAnalysed[1], g_shaderRefused[1], (double)g_patchesSkipped / g_pfFrames);
+            if (g_lazyState) Log("   PERF lazy_state: restore calls avoided %.1f per frame (the game re-uploaded them), deferred restores done %.1f per frame\n",
+                (double)g_lazySavedCalls / g_pfFrames, (double)g_lazyFlushedCalls / g_pfFrames);
+            g_lazySavedCalls = g_lazyFlushedCalls = 0;
             g_stateCallsTotal = 0; g_patchesSkipped = 0;
             memset(g_pf, 0, sizeof(g_pf)); g_pfFrames = 0; gpu::g_s.waitTicks = 0;
         }
@@ -2351,6 +2841,9 @@ static HRESULT WINAPI HookPresent(IDirect3DDevice9* self, const RECT* a, const R
             g_gpuPathWanted ? 1 : 0, g_gpuActive ? 1 : 0, g_gpuFrames, g_gpuFails, g_gpuWhy, gpu::CandidateCount(), gpu::g_s.createCalls, gpu::g_s.createCaptured, gpu::g_s.hits, g_desktopSkipped,
             g_redirect ? 1 : 0, g_bbW, g_bbH, g_logW, g_logH, g_cursorOn ? 1 : 0);
         g_gpuFrames = g_gpuFails = g_desktopSkipped = 0;
+        if (g_isDxvk) Log("   VK PATH (DXVK): wanted=%d attached=%d active=%d frames=%u fallbacks=%u (last reason: %s)\n",
+            g_vkPathWanted ? 1 : 0, g_vk.Attached() ? 1 : 0, g_vkActive ? 1 : 0, g_vkFrames, g_vkFails, g_vkWhy);
+        g_vkFrames = g_vkFails = 0;
         if (g_tSamples) {
             const double n = (double)g_tSamples;
             Log("   VR capture stages (avg ms per eye): stretch=%.2f getRenderTargetData=%.2f lock=%.2f convert=%.2f upload=%.2f\n",
@@ -2387,6 +2880,7 @@ static HRESULT WINAPI HookPresent(IDirect3DDevice9* self, const RECT* a, const R
         g_stats = Stats{};
     }
     if (g_vrWanted.load() || g_vrActive) { const int64_t tb = g_log ? PerfTick() : 0; VRBeforePresent(self); if (g_log && g_vrActive) g_pf[PF_BEFORE] += PerfTick() - tb; }
+    g_laserDone = false;
     HRESULT presentHr = D3D_OK;
     // While in VR the desktop window is not needed. Presenting to it costs a blit AND waits for the monitor's vertical
     // sync, and that wait then adds to the headset wait (two waits in series), so skip it (desktop_every=N shows every Nth frame).
@@ -2401,6 +2895,8 @@ static HRESULT WINAPI HookReset(IDirect3DDevice9* self, D3DPRESENT_PARAMETERS* p
     LogPresentParams("Reset", pp);
     RestoreCamera();
     VRReleaseCapture();                       // default-pool surfaces must not survive a Reset; recreated lazily
+    LazyForget();
+    g_vk.ReleaseCopy();                       // default-pool texture: must be released before Reset
     gpu::ReleaseEyes();                       // dgVoodoo keeps its D3D11 device across a Reset (phase 7b wrongly forgot it); a NEW device would arrive through the creation hook
     VRRedirectEnd(self);
     g_vsActive = g_psActive = false; g_curFVF = 0; g_havePendingView = false; g_haveOrigView = g_haveOrigProj = false; g_rtIsMain = true; g_haveGameVP = false; g_rightVersion = ~0u;
@@ -2451,12 +2947,23 @@ static HRESULT WINAPI HookCreateDevice(IDirect3D9* self, UINT adapter, D3DDEVTYP
     Log("CreateDevice adapter=%u type=%d behaviorFlags=0x%lX\n", adapter, (int)type, (unsigned long)flags);
     HRESULT hr = g_origCreateDevice(self, adapter, type, wnd, flags, pp, out);
     Log("CreateDevice hr=0x%08lX dev=%p\n", (unsigned long)hr, out ? (void*)*out : nullptr);
-    if (SUCCEEDED(hr) && out && *out) { PatchDevice(*out); InstallCameraHook(); }
+    if (SUCCEEDED(hr) && out && *out) {
+        PatchDevice(*out); InstallCameraHook();
+        if (g_isDxvk && g_vkPathWanted && !g_vk.Attach(*out, Log)) Log("VK path: DXVK detected but the device has no interop interface -> CPU path\n");
+    }
     return hr;
 }
 
 static IDirect3D9* WINAPI HookDirect3DCreate9(UINT sdk)
 {
+    {
+        char path[MAX_PATH] = {};
+        g_isDxvk = vkp::ModuleLooksLikeDxvk(reinterpret_cast<const void*>(g_origCreate9), path, sizeof(path));
+        Log("D3D9 layer: %s -> %s\n", path[0] ? path : "?", g_isDxvk ? "DXVK" : "not DXVK (dgVoodoo or Windows)");
+        // DXVK asks SteamVR for the Vulkan extensions it needs while creating its instance, i.e. inside this call,
+        // and only if openvr_api.dll is already loaded. So load it now.
+        if (g_isDxvk && g_vkPathWanted) vkp::PreloadOpenVR(ModuleDir().c_str(), Log);
+    }
     IDirect3D9* obj = g_origCreate9(sdk);
     Log("Direct3DCreate9(%u) -> %p\n", sdk, (void*)obj);
     if (!obj) return obj;
@@ -2622,10 +3129,10 @@ static void OpenLogEarly()
 //     head=PAGEUP
 // Key names: A-Z, 0-9, F1-F24, NUMPAD0-9, NUMPAD_DIVIDE/MULTIPLY/SUBTRACT/ADD/DECIMAL, INSERT, DELETE,
 //            HOME, END, PAGEUP, PAGEDOWN, PAUSE, SCROLLLOCK.
-enum Action { ACT_CAPTURE, ACT_SCAN, ACT_RECENTER, ACT_TEST, ACT_HEAD, ACT_VR, ACT_SCALE_UP, ACT_SCALE_DOWN, ACT_CULL, ACT_HUD_NEAR, ACT_HUD_FAR, ACT_RECENTER2, ACT_POSITIONAL, ACT_RECENTER3, ACT_CURSOR, ACT_PITCHLOCK, ACT_COUNT };
-static int g_keyVk[ACT_COUNT] = { 'C', 0 /*scan: unbound*/, 0 /*recenter: Numpad - now belongs to the pitch lock; recenter2/3 remain*/, VK_ADD, VK_INSERT, VK_MULTIPLY, VK_PRIOR, VK_NEXT, VK_HOME, VK_END, VK_DELETE, VK_DIVIDE, 'P', VK_OEM_2, 'M', VK_SUBTRACT };
-static const char* kActionName[ACT_COUNT] = { "capture", "scan", "recenter", "test", "head", "vr", "scale_up", "scale_down", "cull", "hud_near", "hud_far", "recenter2", "positional", "recenter3", "cursor", "pitch_lock" };
-static const char* kActionDesc[ACT_COUNT] = { "capture one frame", "scan memory for camera", "recenter forward", "20-degree rotation test", "head tracking on monitor", "VR mode on/off", "world scale up", "world scale down", "culling follows head on/off", "HUD closer", "HUD farther", "recenter forward (alternate key)", "head position tracking on/off", "recenter forward (main-keyboard slash)", "VR mouse cursor on/off", "mouse pitch lock on/off (mouse no longer tilts the view; the headset does)" };
+enum Action { ACT_CAPTURE, ACT_SCAN, ACT_RECENTER, ACT_TEST, ACT_HEAD, ACT_VR, ACT_SCALE_UP, ACT_SCALE_DOWN, ACT_CULL, ACT_HUD_NEAR, ACT_HUD_FAR, ACT_RECENTER2, ACT_POSITIONAL, ACT_RECENTER3, ACT_CURSOR, ACT_PITCHLOCK, ACT_HUD_STYLE, ACT_LASER, ACT_COUNT };
+static int g_keyVk[ACT_COUNT] = { 'C', 0 /*scan: unbound*/, 0 /*recenter: Numpad - now belongs to the pitch lock; recenter2/3 remain*/, VK_ADD, VK_INSERT, VK_MULTIPLY, VK_PRIOR, VK_NEXT, VK_HOME, VK_END, VK_DELETE, VK_DIVIDE, 'P', VK_OEM_2, 'M', VK_SUBTRACT, 'H', 'L' };
+static const char* kActionName[ACT_COUNT] = { "capture", "scan", "recenter", "test", "head", "vr", "scale_up", "scale_down", "cull", "hud_near", "hud_far", "recenter2", "positional", "recenter3", "cursor", "pitch_lock", "hud_cycle", "laser" };
+static const char* kActionDesc[ACT_COUNT] = { "capture one frame", "scan memory for camera", "recenter forward", "20-degree rotation test", "head tracking on monitor", "VR mode on/off", "world scale up", "world scale down", "culling follows head on/off", "HUD closer", "HUD farther", "recenter forward (alternate key)", "head position tracking on/off", "recenter forward (main-keyboard slash)", "VR mouse cursor on/off", "mouse pitch lock on/off (mouse no longer tilts the view; the headset does)", "HUD style: flat -> curved -> low", "laser pointer on/off" };
 
 static int ParseKey(const char* n)
 {
@@ -2657,12 +3164,21 @@ static void LoadHotkeyConfig()
         if (_stricmp(line, "eye_size") == 0) { g_eyeSizeCfg = (UINT)atoi(val); Log("WARVR.ini: eye_size -> %u\n", g_eyeSizeCfg); continue; }
         if (_stricmp(line, "positional") == 0) { g_positional = atoi(val) != 0; Log("WARVR.ini: positional -> %d\n", g_positional ? 1 : 0); continue; }
         if (_stricmp(line, "gpu_path") == 0) { g_gpuPathWanted = _stricmp(val, "off") != 0; Log("WARVR.ini: gpu_path -> %s\n", g_gpuPathWanted ? "auto" : "off"); continue; }
+        if (_stricmp(line, "vr_snapshot_hud_cycle") == 0) { g_snapshotHudCycle = (_stricmp(val, "on") == 0); continue; }
+        if (_stricmp(line, "vr_snapshot") == 0) { g_snapshotAt = (unsigned)atoi(val); const char* k = strchr(val, ','); g_snapshotCount = k ? (unsigned)atoi(k + 1) : 1; if (g_snapshotCount < 1) g_snapshotCount = 1; Log("WARVR.ini: vr_snapshot -> %u\n", g_snapshotAt); continue; }
+        if (_stricmp(line, "auto_vr") == 0) { g_autoVr = _stricmp(val, "on") == 0 || _stricmp(val, "1") == 0; Log("WARVR.ini: auto_vr -> %s\n", g_autoVr ? "on" : "off"); continue; }
+        if (_stricmp(line, "lazy_state") == 0) { g_lazyState = _stricmp(val, "on") == 0 || _stricmp(val, "1") == 0; Log("WARVR.ini: lazy_state -> %s\n", g_lazyState ? "on (experimental)" : "off"); continue; }
+        if (_stricmp(line, "vk_path") == 0) { g_vkPathWanted = _stricmp(val, "off") != 0; Log("WARVR.ini: vk_path -> %s\n", g_vkPathWanted ? "auto" : "off"); continue; }
         if (_stricmp(line, "desktop_every") == 0) { g_desktopEvery = (unsigned)atoi(val); Log("WARVR.ini: desktop_every -> %u\n", g_desktopEvery); continue; }
+        if (_stricmp(line, "draw_distance_flat") == 0) { g_drawDistFlat = !(_stricmp(val, "off") == 0 || _stricmp(val, "0") == 0); Log("WARVR.ini: draw_distance_flat -> %s\n", g_drawDistFlat ? "on (draw_distance also applies when VR is off)" : "off (VR only, the original behaviour)"); continue; }
         if (_stricmp(line, "draw_distance") == 0) { float v = (float)atof(val); if (v >= 1.0f && v <= 16.f) g_drawDistScale = v; Log("WARVR.ini: draw_distance -> x%.2f (far plane multiplier)\n", g_drawDistScale); continue; }
         if (_stricmp(line, "pitch_lock_start") == 0) { g_pitchLock = (_stricmp(val, "on") == 0 || _stricmp(val, "true") == 0 || _stricmp(val, "1") == 0); Log("WARVR.ini: pitch_lock_start -> %s\n", g_pitchLock.load() ? "on" : "off"); continue; }
         if (_stricmp(line, "log") == 0) { Log("WARVR.ini: log -> on\n"); continue; }
         if (_stricmp(line, "water") == 0) { g_waterMode = _stricmp(val, "off") != 0; Log("WARVR.ini: water -> %s\n", g_waterMode ? "on (planar reflection rendered for both eyes)" : "off"); continue; }
         if (_stricmp(line, "cursor") == 0) { g_cursorOn = _stricmp(val, "off") != 0; Log("WARVR.ini: cursor -> %s\n", g_cursorOn ? "on" : "off"); continue; }
+        if (_stricmp(line, "laser") == 0) { g_laserOn = (_stricmp(val, "on") == 0 || _stricmp(val, "1") == 0); Log("WARVR.ini: laser -> %s\n", g_laserOn ? "on" : "off"); continue; }
+        if (_stricmp(line, "laser_origin") == 0) { g_laserOrigin = _stricmp(val, "eyes") == 0 || _stricmp(val, "head") == 0 ? 1 : 0; Log("WARVR.ini: laser_origin -> %s\n", g_laserOrigin ? "eyes" : "hand"); continue; }
+        if (_stricmp(line, "laser_width") == 0) { float v = (float)atof(val); if (v >= 1.f && v <= 20.f) g_laserPx = v; Log("WARVR.ini: laser_width -> %.1f px\n", g_laserPx); continue; }
         if (_stricmp(line, "cursor_size") == 0) { float v = (float)atof(val); if (v > 0.005f && v < 0.5f) g_cursorSize = v; Log("WARVR.ini: cursor_size -> %.3f\n", g_cursorSize); continue; }
         if (_stricmp(line, "vr_resolution") == 0) { g_resMode = _stricmp(val, "steamvr") == 0 ? 1 : (_stricmp(val, "desktop") == 0 ? 0 : 2); Log("WARVR.ini: vr_resolution -> %s\n", g_resMode == 1 ? "steamvr (always render at the size SteamVR recommends)" : (g_resMode == 0 ? "desktop (the game's own resolution)" : "auto (SteamVR's size when the GPU hand-off is available)")); continue; }
         if (_stricmp(line, "max_pixels") == 0) { g_maxPixels = atof(val) * 1e6; Log("WARVR.ini: max_pixels -> %.1f million (0 = no limit)\n", g_maxPixels / 1e6); continue; }
@@ -2674,7 +3190,16 @@ static void LoadHotkeyConfig()
         if (_stricmp(line, "hud_anchor") == 0) { g_hudAnchor = (_stricmp(val, "head") == 0) ? 0 : (_stricmp(val, "billboard") == 0 ? 1 : 2); Log("WARVR.ini: hud_anchor -> %s\n", g_hudAnchor == 2 ? "world (a flat panel fixed in the game's frame)" : (g_hudAnchor == 1 ? "billboard (anchored in the game's frame, always faces you)" : "head (locked to the headset)")); continue; }
         if (_stricmp(line, "hud_distance") == 0) { float v = (float)atof(val); if (v > 0.2f) g_hudDistance = v; Log("WARVR.ini: hud_distance -> %.2f m\n", g_hudDistance); continue; }
         if (_stricmp(line, "hud_width") == 0) { float v = (float)atof(val); if (v > 0.1f) g_hudWidth = v; Log("WARVR.ini: hud_width -> %.2f m\n", g_hudWidth); continue; }
-        if (_stricmp(line, "hud_vertical") == 0) { g_hudVert = (float)atof(val); Log("WARVR.ini: hud_vertical -> %.2f m\n", g_hudVert); continue; }
+        if (_stricmp(line, "hud_vertical") == 0) { g_hudVertUser = (float)atof(val); g_hudVert = g_hudVertUser + (g_hudStyle == 2 ? -0.35f : 0.f); Log("WARVR.ini: hud_vertical -> %.2f m\n", g_hudVert); continue; }
+        if (_stricmp(line, "hud_style") == 0) {
+            const int st = _stricmp(val, "curved") == 0 ? 1 : (_stricmp(val, "low") == 0 ? 2 : 0);
+            ApplyHudStyle(st);
+            Log("WARVR.ini: hud_style -> %s (curve %s, tilt %.0f deg, vertical %.2f m)\n", HudStyleName(st), g_hudCurve ? "on" : "off", g_hudTilt, g_hudVert);
+            continue; }
+        if (_stricmp(line, "hud_curve") == 0) { g_hudCurve = !(_stricmp(val, "off") == 0 || _stricmp(val, "0") == 0); g_hudStyle = 3; Log("WARVR.ini: hud_curve -> %s\n", g_hudCurve ? "on" : "off"); continue; }
+        if (_stricmp(line, "hud_tilt") == 0) { float v = (float)atof(val); if (v >= -60.f && v <= 60.f) g_hudTilt = v; g_hudStyle = 3; Log("WARVR.ini: hud_tilt -> %.1f deg\n", g_hudTilt); continue; }
+        if (_stricmp(line, "hud_follow") == 0) { g_hudFollow = (_stricmp(val, "lazy") == 0 || _stricmp(val, "on") == 0); Log("WARVR.ini: hud_follow -> %s\n", g_hudFollow ? "lazy" : "off"); continue; }
+        if (_stricmp(line, "hud_follow_deg") == 0) { float v = (float)atof(val); if (v >= 5.f && v <= 170.f) g_hudFollowDeg = v; Log("WARVR.ini: hud_follow_deg -> %.0f\n", g_hudFollowDeg); continue; }
         if (_stricmp(line, "steer") == 0) {
             if (_stricmp(val, "constants") == 0) { g_steerMode = 1; Log("WARVR.ini: steer -> constants (older method)\n"); }
             else if (_stricmp(val, "camera") == 0) { g_steerMode = 0; Log("WARVR.ini: steer -> camera\n"); }
@@ -2758,6 +3283,15 @@ static void RunAction(Action a, const char* via)
         BeepAsync(a == ACT_HUD_NEAR ? 900 : 600, 60);
         Log("HUD distance = %.2f m (width %.2f m)\n", g_hudDistance, g_hudWidth);
         break;
+    case ACT_LASER: {
+        g_laserOn = !g_laserOn; BeepAsync(g_laserOn ? 1400 : 500, 120);
+        Log("laser pointer = %d\n", g_laserOn ? 1 : 0);
+        break; }
+    case ACT_HUD_STYLE: {
+        const int next = (g_hudStyle >= 2) ? 0 : g_hudStyle + 1;
+        ApplyHudStyle(next); BeepAsync(700 + 300 * next, 80);
+        Log("HUD style = %s (curve %s, tilt %.0f deg, vertical %.2f m)\n", HudStyleName(next), g_hudCurve ? "on" : "off", g_hudTilt, g_hudVert);
+        break; }
     case ACT_CURSOR: {
         g_cursorOn = !g_cursorOn; BeepAsync(g_cursorOn ? 1400 : 500, 120);
         Log("VR mouse cursor = %d\n", g_cursorOn ? 1 : 0);
@@ -2833,6 +3367,7 @@ static DWORD WINAPI Worker(void*)
             if (a >= 0 && a < ACT_COUNT) RunAction(static_cast<Action>(a), "RegisterHotKey");
         }
         for (int a = 0; a < ACT_COUNT; ++a) if (PolledTrigger(static_cast<Action>(a))) RunAction(static_cast<Action>(a), "polled");
+        if (g_autoVrRequest.exchange(false)) RunAction(ACT_VR, "auto_vr");
 
         // Diagnostics: while Ctrl+Shift are held, log every other key Windows reports as down.
         bool chord = (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000);
