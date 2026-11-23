@@ -1,8 +1,7 @@
 Experimental VR mod for Warhammer Online: Age of Reckoning
-by Ross Scott
 
 ## Maintained version
-Ross Scott made this mod. Since November 2026 Lucas Traba (lucastraba) maintains it here, with Ross's permission, so the updates and improvements since the original are Lucas's responsibility, not Ross's. Ross's original description and instructions are kept below.
+This mode was originally vibe-coded using Claude Sonnet 5.5 by Ross Scott.  It knowingly had shortcomings and was intended as a foundation for potentially making the mod better.  Since November 2026 Lucas Traba (lucastraba) maintains it here, with Ross's permission, so the updates and improvements since the original are Lucas's contribution.
 
 -AI disclosure: the original version was completely vibe-coded (see the description below). The changes since then were also written with AI (Claude), and checked with unit tests, under Wine on Linux with a fake headset, and, where noted, by Ross on Windows with a real headset.
 
@@ -29,10 +28,6 @@ Ross Scott made this mod. Since November 2026 Lucas Traba (lucastraba) maintains
 ## Description:
 This mod will activate full 3D VR rendering when inside Warhammer Online and should scale to any resolution.
 
-This mod is 100% vibe-coded from Claude Sonnet 5.5, so it could be a mess code-wise.
-
-There are no plans to support or develop this further, but you are welcome to do anything you want with it.  Hopefully someone who knows what they're doing will improve upon it and make this obsolete.
-
 ## Warning:
 Running this mod on the "Return of Reckoning" server is NOT recommended!  You may get banned if you do.
 
@@ -41,13 +36,9 @@ Running this mod on the "Return of Reckoning" server is NOT recommended!  You ma
 
 -VR headset capable of running OpenVR / SteamVR games. (tested on PCVR)
 
--A copy of dgvoodoo2 no later than 2.78.2.
-
 -Windows (it might be possible for Linux, but is completely untested)
 
 ## Known issues:
--It has some sort of CPU bottleneck in some areas, causing a framerate drop.
-
 -No motion controls have been added, just default game controls. 
 
 -The HUD operates as a floating plane and is not optimized for VR use, but is functional. 
@@ -63,21 +54,13 @@ This mod assumes you have a Warhammer Online - Age of Reckoning server already r
 third_party\openvr\bin\win32\openvr_api.dll
 bin\WarVRInjector.exe
 bin\WARVR.dll
-2. Download dgvoodoo2 version no later than 2.78.2.  This mod was made using 2.78.1.
-Source code:
-https://github.com/dege-diosg/dgVoodoo2/releases
-Binary for 2.78.1:
-https://www.t2e.pl/t2e-download/dgvoodoo2.1046
-3. Copy the contents from dgvoodoo2 from MS\x86 directory to your Warhammer client directory.
-4. Run the included dgVoodooCpl.exe control panel
-Click the "Add" button and navigate to your Warhammer client folder.
-On the DirectX Tab change VRAM to 4096 (may not be necessary, but I recall it helping).
-(optional) uncheck "dgvoodoo Watermark"
-Press apply
-5. Run WARVRInjector.exe prior to launching the game
-6. Fully load a character in the game
-7. Put on your VR headset.
-8. Press Ctrl+Shift+Numpad* to enable / disable VR.  You may need to alt-tab back into the client.  Press again to disable.
+2. Download DXVK from here:
+https://github.com/doitsujin/dxvk/releases
+3. Extract d3d9.dll from the tar.gz release and place it in your Warhammer client directory.
+4. Run WARVRInjector.exe prior to launching the game
+5. Fully load a character in the game
+6. Put on your VR headset.
+7. Press Ctrl+Shift+Numpad* to enable / disable VR.  You may need to alt-tab back into the client.  Press again to disable.
 
 ## Additional features:
 Creating WARVR.ini in the client directory has some additional options by adding these lines when the injector is launched:
@@ -108,4 +91,5 @@ Ctrl+Shift+Numpad - = lock vertical camera motion so that your view stays level 
 
 This project is an unofficial fan modification. It is not affiliated with or endorsed by
 Valve, EA/Mythic, or the author of dgVoodoo2. SteamVR and OpenVR are trademarks of Valve.
+
 
