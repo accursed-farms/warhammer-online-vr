@@ -1,7 +1,7 @@
 Experimental VR mod for Warhammer Online: Age of Reckoning
 
 ## Maintained version
-This mode was originally vibe-coded using Claude Sonnet 5.5 by Ross Scott.  It knowingly had shortcomings and was intended as a foundation for potentially making the mod better.  Since November 2026 Lucas Traba (lucastraba) maintains it here, with Ross's permission, so the updates and improvements since the original are Lucas's contribution.
+This mode was originally vibe-coded using Claude Sonnet 5.5 by Ross Scott.  It knowingly had shortcomings and was intended as a foundation for potentially making the mod better.  Since November 2026 Lucas Traba (lucastraba) maintains it here, so the updates and improvements since the original are Lucas's contribution.
 
 -AI disclosure: the original version was completely vibe-coded (see the description below). The changes since then were also written with AI (Claude), and checked with unit tests, under Wine on Linux with a fake headset, and, where noted, by Ross on Windows with a real headset.
 
@@ -91,5 +91,6 @@ Ctrl+Shift+Numpad - = lock vertical camera motion so that your view stays level 
 
 This project is an unofficial fan modification. It is not affiliated with or endorsed by
 Valve, EA/Mythic, or the author of dgVoodoo2. SteamVR and OpenVR are trademarks of Valve.
+
 
 
