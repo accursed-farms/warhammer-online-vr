@@ -29,6 +29,10 @@ if(WIN32)
     target_link_options(WARVR PRIVATE /SAFESEH:NO)
   endif()
 
+  # dinput8.dll next to WAR.exe: starts WARVR.dll with the game (no injector needed), passes DirectInput on.
+  add_library(dinput8proxy SHARED src/dinput8proxy.cpp src/dinput8proxy.def)
+  set_target_properties(dinput8proxy PROPERTIES OUTPUT_NAME "dinput8" PREFIX "")
+
   add_executable(WARVRInjector src/injector.cpp)
   if(MSVC)
     target_compile_definitions(WARVRInjector PRIVATE _MBCS)

@@ -20,9 +20,10 @@ done
 
 WIN=(-target x86-windows-gnu -std=c++17 -O2 -DNDEBUG)
 "${ZIG[@]}" c++ "${WIN[@]}" -shared -o "$out/WARVR.dll" src/WARVR.cpp -luser32
+"${ZIG[@]}" c++ "${WIN[@]}" -shared -o "$out/dinput8.dll" src/dinput8proxy.cpp src/dinput8proxy.def
 "${ZIG[@]}" c++ "${WIN[@]}" -o "$out/WARVRInjector.exe" src/injector.cpp
 "${ZIG[@]}" c++ "${WIN[@]}" -Wl,--subsystem,windows -o "$out/WARVRConfig.exe" src/config.cpp \
   -luser32 -lgdi32 -lcomctl32 -lshell32 -lole32 -ladvapi32
 cp third_party/openvr/bin/win32/openvr_api.dll "$out/"
 rm -f "$out"/*.pdb "$out"/*.lib
-echo "built: $out/WARVR.dll $out/WARVRInjector.exe $out/WARVRConfig.exe $out/openvr_api.dll"
+echo "built: $out/WARVR.dll $out/dinput8.dll $out/WARVRInjector.exe $out/WARVRConfig.exe $out/openvr_api.dll"

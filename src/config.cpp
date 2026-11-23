@@ -228,7 +228,7 @@ static void Load()
     ReadAll(g.iniPath, &g.ini);
     ReadAll(g.confPath, &g.conf);
 
-    Check(IDC_AUTOVR, settings::IsOn(IniValue("auto_vr", "off")));
+    Check(IDC_AUTOVR, settings::IsOn(IniValue("auto_vr", "on")));
 
     std::string v;
     g.hudCustom = IniGet(g.ini, "hud_curve", &v) || IniGet(g.ini, "hud_tilt", &v);
@@ -293,7 +293,7 @@ static bool Save()
         std::string cur;
         if (IniGet(ini, key, &cur) || !settings::IEq(val, def)) ini = IniSet(ini, key, val);
     };
-    put("auto_vr", Checked(IDC_AUTOVR) ? "on" : "off", "off");
+    put("auto_vr", Checked(IDC_AUTOVR) ? "on" : "off", "on");
     const int hs = Sel(IDC_HUD);
     if (hs >= 0 && hs < 3) {
         put("hud_style", kHudValues[hs], "flat");

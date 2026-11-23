@@ -16,12 +16,30 @@ jobs:
         run: cmake --build build --config Release
       - name: Unit tests
         run: ctest --test-dir build -C Release --output-on-failure
+      # dist/ is the release: everything in it goes straight into the Warhammer folder (next to WAR.exe).
+      # DXVK's 32-bit d3d9.dll is included (zlib licence), so players don't have to fetch and unpack it.
       - name: Collect install set
         shell: pwsh
+        env:
+          DXVK_VERSION: "3.1.1"
+          DXVK_SHA256: "40565b4a724aadc4433fa4e010b4b23916d9b1f1baeee64e17186db94f54e608"
         run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item build/Release/WARVR.dll, build/Release/WARVRInjector.exe, build/Release/WARVRConfig.exe, build/Release/openvr_api.dll dist/
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force dist, dist/WARVR-docs, dist/WARVR-docs/licenses | Out-Null
+          Copy-Item build/Release/WARVR.dll, build/Release/dinput8.dll, build/Release/WARVRInjector.exe, build/Release/WARVRConfig.exe, build/Release/openvr_api.dll dist/
           Copy-Item "extras/ai-generated WARVR.ini.example" dist/WARVR.ini.example
+          Copy-Item README.md dist/WARVR-README.md
+          Copy-Item docs/*.md, extras/server-time-of-day.patch dist/WARVR-docs/
+          Copy-Item third_party/openvr/LICENSE dist/WARVR-docs/licenses/OpenVR-LICENSE.txt
+          $tgz = "dxvk-$env:DXVK_VERSION.tar.gz"
+          Invoke-WebRequest "https://github.com/doitsujin/dxvk/releases/download/v$env:DXVK_VERSION/$tgz" -OutFile $tgz
+          $h = (Get-FileHash $tgz -Algorithm SHA256).Hash.ToLower()
+          if ($h -ne $env:DXVK_SHA256) { throw "DXVK download hash mismatch: $h" }
+          tar -xzf $tgz "dxvk-$env:DXVK_VERSION/x32/d3d9.dll"
+          Copy-Item "dxvk-$env:DXVK_VERSION/x32/d3d9.dll" dist/d3d9.dll
+          Invoke-WebRequest "https://raw.githubusercontent.com/doitsujin/dxvk/v$env:DXVK_VERSION/LICENSE" -OutFile dist/WARVR-docs/licenses/DXVK-LICENSE.txt
+          "DXVK $env:DXVK_VERSION (x32/d3d9.dll), https://github.com/doitsujin/dxvk/releases/tag/v$env:DXVK_VERSION" | Out-File -Encoding utf8 dist/WARVR-docs/licenses/DXVK-VERSION.txt
+          Get-ChildItem -Recurse dist | ForEach-Object { $_.FullName.Substring((Resolve-Path dist).Path.Length) }
       - uses: actions/upload-artifact@v4
         with:
           name: WARVR-win32-${{ github.sha }}
