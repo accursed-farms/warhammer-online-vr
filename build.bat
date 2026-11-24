@@ -1,7 +1,7 @@
 @echo off
-rem Builds WARVR.dll and WARVRInjector.exe (32-bit, Release) and runs the unit tests.
+rem Builds the mod (dinput8.dll) and WARVRConfig.exe (32-bit, Release) and runs the unit tests.
 rem Needs Visual Studio 2022 or newer with "Desktop development with C++" (it includes CMake).
-rem Result: build\Release\  (WARVR.dll, WARVRInjector.exe, openvr_api.dll) - copy those three into the WAR folder.
+rem Result: build\Release\  (dinput8.dll, WARVRConfig.exe, openvr_api.dll) - copy those three into the WAR folder.
 setlocal
 cd /d "%~dp0"
 
@@ -23,8 +23,8 @@ ctest --test-dir build -C Release --output-on-failure || goto :fail
 
 echo.
 echo Done. Copy these into your Warhammer folder:
-echo   %CD%\build\Release\WARVR.dll
-echo   %CD%\build\Release\WARVRInjector.exe
+echo   %CD%\build\Release\dinput8.dll
+echo   %CD%\build\Release\WARVRConfig.exe
 echo   %CD%\build\Release\openvr_api.dll
 pause
 exit /b 0

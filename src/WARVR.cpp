@@ -338,7 +338,7 @@ static double g_maxPixels = 0, g_renderScale = 1.0;   // 0 = no pixel budget: St
 static unsigned g_gpuSubmitErrStreak = 0;        // consecutive Submit() errors while the GPU hand-off was in use
 // DXVK hand-off (vkpath.h): used when DXVK's d3d9.dll is the D3D9 layer instead of dgVoodoo.
 static bool g_vkPathWanted = true;               // INI vk_path=auto|off
-static bool g_autoVr = false;                    // INI auto_vr=on: switch VR on once, at the first in-world frame (testing without hotkeys)
+static bool g_autoVr = true;                     // auto_vr (default on): switch VR on once, shortly after you enter the world; auto_vr=off waits for the hotkey
 static std::atomic<bool> g_autoVrRequest{false}; // set by Present, run by the worker thread like a hotkey
 static bool g_isDxvk = false;                    // the d3d9.dll the game uses is DXVK (decided in the Direct3DCreate9 hook)
 static vkp::Handoff g_vk;
@@ -2654,7 +2654,7 @@ static void VRBeforePresent(IDirect3DDevice9* dev)
                     Log("GPU path: d3d12.dll IS loaded in this process. dgVoodoo is most likely using its DIRECT3D 12 output; there is no D3D11 device to copy from. "
                         "Open dgVoodooCpl.exe -> DirectX tab -> Output API and choose Direct3D 11 (feature level 11.0), then restart the game.\n");
                 else if (gpu::g_s.createCalls == 0)
-                    Log("GPU path: the creation hooks saw no D3D11CreateDevice call at all. Either WARVR.dll was injected after the game's device already existed (inject earlier / start the injector first), "
+                    Log("GPU path: the creation hooks saw no D3D11CreateDevice call at all. Either the mod was loaded after the game's device already existed (put dinput8.dll next to WAR.exe so the game loads it at start), "
                         "or dgVoodoo is not the D3D9 layer in use.\n");
             }
         }
@@ -3148,7 +3148,7 @@ static void OpenLogEarly()
 
 // ---------------------------------------------------------------- hotkeys
 // All actions are Ctrl+Shift + <key>. Defaults are the numpad operator keys (they do not depend on
-// NumLock and the game does not bind them). Override any of them in WARVR.ini next to WARVR.dll:
+// NumLock and the game does not bind them). Override any of them in WARVR.ini next to WAR.exe:
 //     capture=F6
 //     scan=NUMPAD_MULTIPLY
 //     recenter=HOME
@@ -3360,6 +3360,7 @@ static DWORD WINAPI Worker(void*)
     OpenLogEarly();
     g_perturbQ = vrm::cameraDelta(vrm::rotY(-20.f * 3.14159265f / 180.f), 0.f);   // 20 deg yaw right
     Log("=== worker started (thread %lu) ===\n", GetCurrentThreadId());
+    { char me[MAX_PATH] = {}; GetModuleFileNameA(g_self, me, MAX_PATH); Log("mod file: %s\n", me); }
     LoadHotkeyConfig();
     if (g_gpuPathWanted) gpu::InstallCreateHooks(Log);       // must happen before dgVoodoo creates its D3D11 device
     else Log("GPU path: disabled by WARVR.ini (gpu_path=off)\n");

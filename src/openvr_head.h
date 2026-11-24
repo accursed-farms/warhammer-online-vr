@@ -5,7 +5,7 @@
 //   * Scene  : full VR application. Adds the compositor: WaitGetPoses + Submit of per-eye textures.
 //
 // WAR.exe is 32-bit; SteamVR (and so the Pimax via Pimax Play's SteamVR mode) still supports 32-bit OpenVR
-// clients. Put the 32-bit openvr_api.dll next to WARVR.dll (the build copies it).
+// clients. Put the 32-bit openvr_api.dll next to the mod (the build copies it).
 #pragma once
 #define OPENVR_API_NODLL           // we bind by GetProcAddress; do not dllimport the S_API functions
 #include <windows.h>

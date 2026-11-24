@@ -22,7 +22,7 @@
 ; off          = the earlier behaviour (use this if the water looks wrong and send a log with log=on).
 ;water=on
 
-; Optional. Copy to WARVR.ini next to WARVR.dll. Everything is optional; defaults are shown (commented out).
+; Optional. Copy to WARVR.ini next to WAR.exe. Everything is optional; defaults are shown (commented out).
 
 ; ---------------------------------------------------------------- performance (phase 7a)
 ; gpu_path: send each eye to SteamVR with a pure GPU copy instead of reading the picture back through the CPU.
@@ -36,9 +36,9 @@
 ;   viewport and shader constants back at once (several D3D calls per object). on = only when something needs them,
 ;   and not at all when the game overwrites them anyway. Compare the PERF lines with it off and on; report odd visuals.
 ;lazy_state=off
-; auto_vr: on = switch VR on by itself once the character is in the world (same as pressing Ctrl+Shift+Numpad *).
-;   Meant for test runs and setups where the hotkey does not reach the game.
-;auto_vr=off
+; auto_vr: on (default) = VR switches on by itself a few seconds after your character is in the world, so you can
+;   put the headset on and play. off = wait for Ctrl+Shift+Numpad *. The hotkey toggles VR either way.
+;auto_vr=on
 ; vr_snapshot: save the picture the headset receives once, after this many VR frames, as
 ;   %TEMP%\WARVR_vr_snapshot_<n>.bmp (half size, left half = left eye). 0 = off.
 ;vr_snapshot=0

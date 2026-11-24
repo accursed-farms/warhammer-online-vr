@@ -1,6 +1,6 @@
 // WARVRConfig.exe: a small settings window for WARVR, for people who would rather not edit WARVR.ini by hand.
 //
-// It lives next to WARVR.dll in the Warhammer folder and edits, keeping everything else in those files as it was:
+// It lives next to WAR.exe in the Warhammer folder and edits, keeping everything else in those files as it was:
 //   WARVR.ini   the main options (the same keys you can type by hand; every other option stays there)
 //   dxvk.conf   anisotropic filtering, when the game runs on DXVK
 //   HKCU\Environment DXVK_LOG_LEVEL   whether DXVK writes its own WAR_d3d9.log
@@ -228,7 +228,7 @@ static void Load()
     ReadAll(g.iniPath, &g.ini);
     ReadAll(g.confPath, &g.conf);
 
-    Check(IDC_AUTOVR, settings::IsOn(IniValue("auto_vr", "off")));
+    Check(IDC_AUTOVR, settings::IsOn(IniValue("auto_vr", "on")));
 
     std::string v;
     g.hudCustom = IniGet(g.ini, "hud_curve", &v) || IniGet(g.ini, "hud_tilt", &v);
@@ -293,7 +293,7 @@ static bool Save()
         std::string cur;
         if (IniGet(ini, key, &cur) || !settings::IEq(val, def)) ini = IniSet(ini, key, val);
     };
-    put("auto_vr", Checked(IDC_AUTOVR) ? "on" : "off", "off");
+    put("auto_vr", Checked(IDC_AUTOVR) ? "on" : "off", "on");
     const int hs = Sel(IDC_HUD);
     if (hs >= 0 && hs < 3) {
         put("hud_style", kHudValues[hs], "flat");

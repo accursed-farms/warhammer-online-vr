@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cross-compile WARVR.dll and WARVRInjector.exe for 32-bit Windows from Linux or macOS, and run the unit tests natively.
+# Cross-compile the mod (dinput8.dll) and WARVRConfig.exe for 32-bit Windows from Linux or macOS, and run the unit tests natively.
 # Needs: a C++ compiler for the tests, and either `zig` on PATH or `uvx` (uv) to fetch it (pip package "ziglang").
 # Usage: tools/build-cross.sh [output-dir]      (default: build-cross/)
 set -euo pipefail
@@ -19,10 +19,9 @@ for t in vrmath_test shaderscan_test hookutil_test settings_test; do
 done
 
 WIN=(-target x86-windows-gnu -std=c++17 -O2 -DNDEBUG)
-"${ZIG[@]}" c++ "${WIN[@]}" -shared -o "$out/WARVR.dll" src/WARVR.cpp -luser32
-"${ZIG[@]}" c++ "${WIN[@]}" -o "$out/WARVRInjector.exe" src/injector.cpp
+"${ZIG[@]}" c++ "${WIN[@]}" -shared -o "$out/dinput8.dll" src/WARVR.cpp src/dinput8forward.cpp src/dinput8.def -luser32
 "${ZIG[@]}" c++ "${WIN[@]}" -Wl,--subsystem,windows -o "$out/WARVRConfig.exe" src/config.cpp \
   -luser32 -lgdi32 -lcomctl32 -lshell32 -lole32 -ladvapi32
 cp third_party/openvr/bin/win32/openvr_api.dll "$out/"
 rm -f "$out"/*.pdb "$out"/*.lib
-echo "built: $out/WARVR.dll $out/WARVRInjector.exe $out/WARVRConfig.exe $out/openvr_api.dll"
+echo "built: $out/dinput8.dll $out/WARVRConfig.exe $out/openvr_api.dll"
