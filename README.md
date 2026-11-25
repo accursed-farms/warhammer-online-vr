@@ -1,96 +1,102 @@
-Experimental VR mod for Warhammer Online: Age of Reckoning
+# WAR VR
 
-## Maintained version
-This mode was originally vibe-coded using Claude Sonnet 5.5 by Ross Scott.  It knowingly had shortcomings and was intended as a foundation for potentially making the mod better.  Since November 2026 Lucas Traba (lucastraba) maintains it here, so the updates and improvements since the original are Lucas's contribution.
+Experimental VR mod for Warhammer Online: Age of Reckoning. It renders the game in full 3D on any OpenVR / SteamVR headset; you play with the usual mouse and keyboard.
 
--AI disclosure: the original version was completely vibe-coded (see the description below). The changes since then were also written with AI (Claude), and checked with unit tests, under Wine on Linux with a fake headset, and, where noted, by Ross on Windows with a real headset.
+**Do not use it on the Return of Reckoning server.** You may get banned.
 
--Download: the Releases page of this repository (WARVR.dll, WARVRInjector.exe, WARVRConfig.exe, openvr_api.dll, an example WARVR.ini). The files in bin\ are Ross's original build.
+## Requirements
 
--Stutter when a map first loads: with DXVK (below) the game can stutter for a while when you first load a map or see something new. That is DXVK preparing the game's shaders the first time they are used, not a crash; it settles down, and is usually less on later runs. More in docs\DXVK.md.
+- Windows.
+- A Warhammer Online: Age of Reckoning client and a private server to connect to. If you don't have a server, Ross's unsupported setup notes are in [extras/server emulator instructions.txt](extras/server%20emulator%20instructions.txt).
+- A headset that runs SteamVR games.
+- A graphics card and driver with Vulkan 1.3 (for DXVK, which is included).
 
--DXVK instead of dgVoodoo: the fix for the CPU bottleneck. Ross measured 90 fps across the board on it, including where dgVoodoo dropped frames. See docs\DXVK.md. With your usual dgVoodoo setup the mod still works as before.
+## Install
 
--Settings window: WARVRConfig.exe (next to the injector) sets the main options without editing WARVR.ini by hand: VR on when you enter the world, HUD style, laser, draw distance, lazy_state, the log, DXVK texture filtering and DXVK's own log. It only changes the lines it owns, so a hand-edited WARVR.ini keeps everything else. It can also set the time of day on your own ProjectWAR server, after a two-line server change (docs\SERVER_TIME.md).
+1. Download the zip from [Releases](https://github.com/accursed-farms/warhammer-online-vr/releases/latest).
+2. Unzip it into your Warhammer folder (the one with WAR.exe). Overwrite if asked.
 
--HUD shape: Ctrl+Shift+H switches the HUD between flat (as before), curved (bent around you, so the minimap and chat at the edges face you) and low (curved, lower and leaned back, a glance down). hud_style=flat|curved|low in WARVR.ini picks the one it starts with.
+That's it. To uninstall, delete `dinput8.dll` from that folder.
 
--Laser pointer: Ctrl+Shift+L (or laser=on in WARVR.ini) draws a red beam along the line the game itself uses for the mouse, ending in a dot on whatever the cursor is really pointing at. laser_origin=hand|eyes picks where the beam starts, laser_width=3 sets its width in pixels. VR only.
+## Play
 
--lazy_state=on in WARVR.ini (with dgVoodoo): skips some of the extra work the mod does for every object.
+1. Start SteamVR.
+2. Start the game and log in.
+3. Put the headset on. VR switches on by itself a few seconds after your character is in the world.
 
--draw_distance now also works without VR (flat screen).
+The first minutes on a map can stutter. That's DXVK preparing the game's shaders the first time it sees them; it settles down and is usually better on later runs.
 
--Problems: set log=on in WARVR.ini (or tick it in WARVRConfig.exe) and open an issue on this repository with %TEMP%\WARVR.log.
+## Hotkeys
 
--Building it yourself: build.bat (Visual Studio), or tools\build-cross.sh on Linux. tools\fakevr is a fake headset for testing without one.
+Hold Ctrl+Shift and tap:
 
-## Description:
-This mod will activate full 3D VR rendering when inside Warhammer Online and should scale to any resolution.
+| Key | Does |
+|---|---|
+| Numpad * | VR on / off |
+| Numpad / | Recenter the view |
+| H | HUD style: flat, curved, low |
+| End / Delete | HUD closer / farther |
+| PageUp / PageDown | World bigger / smaller |
+| Numpad - | Lock the view level (the mouse stops tilting it; the headset does) |
+| M | Mouse cursor on / off |
+| L | Laser pointer on / off |
 
-## Warning:
-Running this mod on the "Return of Reckoning" server is NOT recommended!  You may get banned if you do.
+No numpad? Every key can be changed in `WARVR.ini`. See `WARVR.ini.example`.
 
-## Requirements:
--A functional client of Warhammer Online: Age of Reckoning and a private or local server to connect to.
+## Settings
 
--VR headset capable of running OpenVR / SteamVR games. (tested on PCVR)
+Run `WARVRConfig.exe` for the main options: VR on by itself, HUD style, laser pointer, draw distance, texture filtering, the log. It only changes its own lines in `WARVR.ini`, so anything you edited by hand stays.
 
--Windows (it might be possible for Linux, but is completely untested)
+Everything else is in `WARVR.ini.example`; copy it to `WARVR.ini` and uncomment what you want.
 
-## Known issues:
--No motion controls have been added, just default game controls. 
+## Known issues
 
--The HUD operates as a floating plane and is not optimized for VR use, but is functional. 
+- No motion controllers; mouse and keyboard only.
+- The HUD is a floating panel and isn't designed for VR yet.
+- Some effects may still look wrong in VR. It hasn't been tested thoroughly.
+- The game can crash while loading a character or a zone with VR on. If that happens, turn VR off (Ctrl+Shift+Numpad *) before changing zones.
 
--It is possible some effects may still be bugged for VR, it has not been thoroughly tested.
+## Problems
 
--Occasional client crashes when loading characters (or possible zones), it's recommended not to activate it until you're fully in the game and disable it before loading new zones. 
+Tick "Write WARVR.log" in `WARVRConfig.exe` (or put `log=on` in `WARVR.ini`), play until it goes wrong, then [open an issue](https://github.com/accursed-farms/warhammer-online-vr/issues) and attach `%TEMP%\WARVR.log`.
 
-## Installation:
-This mod assumes you have a Warhammer Online - Age of Reckoning server already running.  If not, unsupported instructions are included in extras\server emulator instructions.txt
+## What's new
 
-1. Copy the following to your Warhammer client directory:
-third_party\openvr\bin\win32\openvr_api.dll
-bin\WarVRInjector.exe
-bin\WARVR.dll
-2. Download DXVK from here:
-https://github.com/doitsujin/dxvk/releases
-3. Extract d3d9.dll from the tar.gz release and place it in your Warhammer client directory.
-4. Run WARVRInjector.exe prior to launching the game
-5. Fully load a character in the game
-6. Put on your VR headset.
-7. Press Ctrl+Shift+Numpad* to enable / disable VR.  You may need to alt-tab back into the client.  Press again to disable.
+### 2026.11.24
+- **One-step install:** unzip into the game folder and play. The game loads the mod by itself, so the injector is gone.
+- **VR switches on by itself** once you're in the world. Turn it off with `auto_vr=off` or in `WARVRConfig.exe`.
+- **DXVK is included** (32-bit `d3d9.dll`), so there's nothing extra to download.
+- The mod file is now `dinput8.dll` instead of `WARVR.dll`. If you're updating, delete `WARVR.dll` and `WARVRInjector.exe`.
 
-## Additional features:
-Creating WARVR.ini in the client directory has some additional options by adding these lines when the injector is launched:
+### 2026.11.23
+- **DXVK instead of dgVoodoo:** fixes the CPU bottleneck. Ross measured 90 fps across the board on it.
+- **Settings window:** `WARVRConfig.exe`.
+- **Laser pointer:** Ctrl+Shift+L.
+- **HUD styles:** Ctrl+Shift+H for flat, curved or low.
+- `draw_distance` works without VR too; `lazy_state` for dgVoodoo; time of day on your own server ([docs/SERVER_TIME.md](docs/SERVER_TIME.md)).
 
-draw_distance=1.0
-(This extends the game draw distance beyond the default maximum.  1.3 looks good, but will reduce performance.
+## About
 
-log=on
-This outputs WARVR.log in your Windows temp directory, useful for diagnosing potential problems 
+Ross Scott made the original version by vibe-coding it with Claude, as a starting point for making the mod better. Since November 2026 Lucas Traba maintains it, with Ross's permission, so the changes since then are on Lucas. They were also written with AI (Claude) and are checked with unit tests, under Wine on Linux with a fake headset, and by Ross on Windows with a real headset where noted.
 
-## Hotkeys:
-Ctrl+Shift+Numpad* = activate / deactivate VR
+Contributions are welcome. To build it yourself: `build.bat` with Visual Studio, or `tools/build-cross.sh` on Linux. `tools/fakevr` is a fake headset for testing without one.
 
-Ctrl+Shift+M = show / hide mouse cursor
+## Old method: dgVoodoo
 
-Ctrl+Shift+PageUp / Pagedown = change world scale
+Before DXVK, the mod ran on dgVoodoo, which is slower in VR (it shares the game's one busy CPU thread). It still works if you need it:
 
-Ctrl+Shift+Del / End = move HUD forward or backwards in 3D space
+1. Install the mod as above, then delete the `d3d9.dll` that came with it.
+2. Download dgVoodoo2, version 2.78.2 or older (the mod was made with 2.78.1): [releases](https://github.com/dege-diosg/dgVoodoo2/releases), or [2.78.1 directly](https://www.t2e.pl/t2e-download/dgvoodoo2.1046).
+3. Copy everything from dgVoodoo's `MS\x86` folder into your Warhammer folder.
+4. Run `dgVoodooCpl.exe`, click "Add" and pick your Warhammer folder. On the DirectX tab, set VRAM to 4096 and (optional) untick the watermark. Press Apply.
 
-Ctrl+Shift+ Numpad / = recenter headtracking
-
-Ctrl+Shift+Numpad - = lock vertical camera motion so that your view stays level in VR, press again to disable
+Ross's original build (`WARVR.dll` with `WARVRInjector.exe`) is attached to the [original release](https://github.com/accursed-farms/warhammer-online-vr/releases/tag/original).
 
 ## Third-party software
-- OpenVR SDK (openvr_capi.h, openvr_api.dll) - Copyright (c) 2015, Valve Corporation,
-  BSD 3-Clause licence. https://github.com/ValveSoftware/openvr
-  Full licence text: third_party/openvr/LICENSE
 
-This project is an unofficial fan modification. It is not affiliated with or endorsed by
-Valve, EA/Mythic, or the author of dgVoodoo2. SteamVR and OpenVR are trademarks of Valve.
+- **OpenVR** (`openvr_api.dll`): Copyright (c) 2015 Valve Corporation, BSD 3-Clause. https://github.com/ValveSoftware/openvr
+- **DXVK** (`d3d9.dll`): Copyright (c) 2017 Philip Rebohle and contributors, zlib licence. https://github.com/doitsujin/dxvk
 
+Their licence texts are in `WARVR-docs/licenses` in the zip.
 
-
+This is an unofficial fan modification, not affiliated with or endorsed by Valve, EA/Mythic, or the authors of DXVK or dgVoodoo2. SteamVR and OpenVR are trademarks of Valve.
